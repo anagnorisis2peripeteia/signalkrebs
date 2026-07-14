@@ -258,6 +258,63 @@ test("ts lint: test files are not scanned", () => {
   });
 });
 
+// Precision fixes found dogfooding openclaw (6/6 hard-fail hits were false positives).
+test("ts lint: a setInterval field cleared via clearTimeout is not flagged (Node aliases them)", () => {
+  const src = [
+    "class P {",
+    "  private t;",
+    "  start() { this.t = setInterval(() => {}, 1000); }",
+    "  stop() { clearTimeout(this.t); }",
+    "}",
+  ].join("\n");
+  withRepo({ "p.ts": src }, (dir) => {
+    assert.equal(lintTs(dir, ["p.ts"]).length, 0);
+  });
+});
+
+test("ts lint: a protected timer field never cleared is advisory, not hard-fail", () => {
+  const src = [
+    "class P {",
+    "  protected t;",
+    "  start() { this.t = setInterval(() => {}, 1000); }",
+    "}",
+  ].join("\n");
+  withRepo({ "p.ts": src }, (dir) => {
+    const hits = lintTs(dir, ["p.ts"]);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].advisory, true, "protected field can be torn down cross-file → advisory");
+  });
+});
+
+test("ts lint: process-lifecycle singleton listeners are not flagged", () => {
+  const src = [
+    "class App {",
+    "  init() {",
+    "    process.on('uncaughtException', () => {});",
+    "    process.on('SIGTERM', () => {});",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "a.ts": src }, (dir) => {
+    assert.equal(lintTs(dir, ["a.ts"]).length, 0);
+  });
+});
+
+test("ts lint: a listener pattern inside a string literal (codegen) is not flagged", () => {
+  const src = [
+    "class G {",
+    "  build() {",
+    "    return [",
+    "      \"process.on('customEvent', () => {})\",",
+    "    ];",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "g.ts": src }, (dir) => {
+    assert.equal(lintTs(dir, ["g.ts"]).length, 0);
+  });
+});
+
 // Regression for the path-reconciliation bug found dogfooding on clawsweeper:
 // eslint returns absolute (/private-symlinked on macOS) paths, and the merge
 // dropped every finding when they didn't string-match the relative input key.

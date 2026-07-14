@@ -44,24 +44,40 @@ interface RawHit {
   advisory?: boolean;
 }
 
-/** R1: setInterval stored on a property (this.x/obj.field) never cleared in this file. */
+/** Is character offset `at` inside a single/double/backtick string on this line?
+ * Cheap heuristic: an odd count of unescaped quotes of any kind before `at`. */
+function isInStringLiteral(text: string, at: number): boolean {
+  if (at < 0) return false;
+  const before = text.slice(0, at);
+  const dq = (before.match(/(?<!\\)"/g) || []).length;
+  const sq = (before.match(/(?<!\\)'/g) || []).length;
+  const bt = (before.match(/(?<!\\)`/g) || []).length;
+  return dq % 2 === 1 || sq % 2 === 1 || bt % 2 === 1;
+}
+
+/** R1: setInterval stored on a property never cleared in this file. */
 function ruleIntervalNeverCleared(lines: string[]): RawHit[] {
   const hits: RawHit[] = [];
   const joined = lines.join("\n");
   lines.forEach((text, i) => {
+    if (isInStringLiteral(text, text.indexOf("setInterval"))) return; // codegen, not a real call
     const m = text.match(/(?:this|[A-Za-z_$][\w$]*)\.([\w$]+)\s*=\s*setInterval\s*\(/);
     if (!m) return;
     const field = m[1];
-    // cleared via clearInterval(this.x) / clearInterval(obj.x), or the field is
-    // handed to clearInterval indirectly (clearInterval(<anything>.x)).
-    const clearRe = new RegExp(`clearInterval\\s*\\(\\s*[\\w$.]*\\b${field}\\b`);
+    // Node aliases clearTimeout/clearInterval, so EITHER clears a setInterval field.
+    const clearRe = new RegExp(`clear(?:Interval|Timeout)\\s*\\(\\s*[\\w$.]*\\b${field}\\b`);
     if (clearRe.test(joined)) return;
+    // A protected/public field can be torn down by a subclass or another file, so
+    // this file-scoped "never cleared" check cannot prove a leak — advisory only.
+    // A private field's lifecycle is entirely in-file, so it hard-fails.
+    const nonPrivate = new RegExp(`\\b(?:protected|public)\\s+(?:readonly\\s+)?${field}\\b`).test(joined);
     hits.push({
       line: i + 1,
       ruleId: "interval-never-cleared",
       kind: "timer-leak",
-      summary: `setInterval stored in '.${field}' is never clearInterval()ed in this file — it keeps firing (and retains its closure) for the owner's lifetime`,
+      summary: `setInterval stored in '.${field}' is never cleared in this file — it keeps firing (and retains its closure) for the owner's lifetime`,
       evidenceLine: text.trim(),
+      advisory: nonPrivate,
     });
   });
   return hits;
@@ -73,6 +89,23 @@ function ruleIntervalNeverCleared(lines: string[]): RawHit[] {
  * each construction stacks another permanent listener (the classic MaxListeners
  * leak). Restricted to process/globalThis targets to stay high-precision.
  */
+// Process-lifecycle events are legitimately registered once at startup and never
+// removed — they are singletons, not per-instance listeners that stack. Firing on
+// them is a false positive (seen on openclaw's index.ts / unhandled-rejections.ts).
+const SINGLETON_EVENTS = new Set([
+  "uncaughtException",
+  "unhandledRejection",
+  "exit",
+  "beforeExit",
+  "SIGINT",
+  "SIGTERM",
+  "SIGHUP",
+  "SIGUSR1",
+  "SIGUSR2",
+  "warning",
+  "rejectionHandled",
+]);
+
 function ruleGlobalListenerNeverRemoved(lines: string[]): RawHit[] {
   const hits: RawHit[] = [];
   const joined = lines.join("\n");
@@ -80,6 +113,8 @@ function ruleGlobalListenerNeverRemoved(lines: string[]): RawHit[] {
   lines.forEach((text, i) => {
     const m = text.match(/\b(process|globalThis)\.(addListener|on|addEventListener)\s*\(\s*['"]([\w:]+)['"]/);
     if (!m) return;
+    if (isInStringLiteral(text, m.index ?? 0)) return; // codegen inside a string, not a real registration
+    if (SINGLETON_EVENTS.has(m[3])) return; // once-per-process lifecycle handler, not a stacking leak
     // Only flag when registered from within a class (constructor/method) — a
     // module-top-level registration is once-per-process and usually intended.
     const indent = text.match(/^\s*/)?.[0].length ?? 0;

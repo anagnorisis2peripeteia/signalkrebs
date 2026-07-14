@@ -178,7 +178,9 @@ export function runConcurrencyAnalysis(
   // Used by the hunt for a free repo-wide pre-filter and for a fast local check.
   if (config.lintOnly) {
     const lintDefects = adapter.lint(repoDir, touchedRanges, { skipTypeAware: config.skipTypeAware });
-    const active = lintDefects.filter((d) => !d.suppressed);
+    // Advisory hits are surfaced (the sweep reads defects[] and splits them) but,
+    // like the gate, do not by themselves make the verdict a defect.
+    const active = lintDefects.filter((d) => !d.suppressed && !d.advisory);
     return {
       detector: config.tool,
       verdict: active.length > 0 ? "defect" : "clean",
