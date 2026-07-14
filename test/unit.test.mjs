@@ -249,3 +249,22 @@ test("ts lint: test files are not scanned", () => {
     assert.equal(lintTs(dir, ["p.test.js"]).length, 0);
   });
 });
+
+// Regression for the path-reconciliation bug found dogfooding on clawsweeper:
+// eslint returns absolute (/private-symlinked on macOS) paths, and the merge
+// dropped every finding when they didn't string-match the relative input key.
+// This drives the REAL type-aware eslint engine end to end, so it also guards the
+// no-floating-promises rule that was never otherwise validated.
+test("ts lint: type-aware no-floating-promises is caught end-to-end", () => {
+  const tsconfig = JSON.stringify({
+    compilerOptions: { strict: true, module: "nodenext", moduleResolution: "nodenext" },
+    include: ["*.ts"],
+  });
+  const src = "export async function f(): Promise<number> { return 1; }\nexport function g(): void { f(); }\n";
+  withRepo({ "tsconfig.json": tsconfig, "x.ts": src }, (dir) => {
+    const hits = lintTs(dir, ["x.ts"]).filter((d) => !d.suppressed);
+    assert.equal(hits.length, 1, "the floating promise must be caught through the real engine");
+    assert.match(hits[0].ruleId, /no-floating-promises/);
+    assert.equal(hits[0].line, 2);
+  });
+});

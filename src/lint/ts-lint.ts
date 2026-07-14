@@ -158,7 +158,12 @@ export default [
       messages: Array<{ ruleId: string | null; line: number; message: string }>;
     }>;
     for (const r of results) {
-      const rel = r.filePath.startsWith(repoDir) ? r.filePath.slice(repoDir.length + 1) : r.filePath;
+      // eslint returns absolute (and on macOS /private-symlinked) paths; the caller
+      // keys by the exact input file string. Match the result back to its input by
+      // suffix so the merge in lintTs() actually finds these hits.
+      const rel =
+        files.find((f) => r.filePath === f || r.filePath.endsWith(`/${f}`)) ??
+        (r.filePath.startsWith(repoDir) ? r.filePath.slice(repoDir.length + 1) : r.filePath);
       const hits: RawHit[] = [];
       for (const msg of r.messages) {
         if (!msg.ruleId) continue; // parse errors are not findings
