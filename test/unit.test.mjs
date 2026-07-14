@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { reconcileVerdict } = await import(pathToFileURL(join(ROOT, "dist/runner.js")).href);
 const { lintGo } = await import(pathToFileURL(join(ROOT, "dist/lint/go-lint.js")).href);
+const { lintSwift } = await import(pathToFileURL(join(ROOT, "dist/lint/swift-lint.js")).href);
 const { parseScopeEntry } = await import(pathToFileURL(join(ROOT, "dist/git-changed-files.js")).href);
 
 function exercise(over) {
@@ -146,5 +147,54 @@ test("lint: range-over-ticker with no exit fires", () => {
     const hits = lintGo(dir, ["r.go:4-4"]);
     assert.equal(hits.length, 1);
     assert.equal(hits[0].ruleId, "range-over-ticker-no-exit");
+  });
+});
+
+// --- Swift lint (precision fix found by dogfooding on steipete/CodexBar) ---
+
+test("swift lint: a self-property timer never cancelled fires", () => {
+  const src = [
+    "final class Poller {",
+    "  private var source: DispatchSourceTimer?",
+    "  func start() {",
+    "    self.source = DispatchSource.makeTimerSource(queue: .main)",
+    "    self.source?.resume()",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "p.swift": src }, (dir) => {
+    const hits = lintSwift(dir, ["p.swift"]).filter((d) => !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].ruleId, "dispatchsource-timer-never-cancelled");
+  });
+});
+
+test("swift lint: a local timer that escapes into a box does NOT fire (CodexBar pattern)", () => {
+  // Reproduces SubprocessRunner.swift: the timer is a local `let`, wrapped into a
+  // box that is cancelled elsewhere — its lifecycle is owned by the receiver, so
+  // flagging it would be a false positive on a hard-fail rule.
+  const src = [
+    "func makeTimer() -> TimeoutTimer {",
+    "  let timeoutTimer = DispatchSource.makeTimerSource(queue: q)",
+    "  timeoutTimer.schedule(deadline: .now() + 1)",
+    "  timeoutTimer.resume()",
+    "  return TimeoutTimer(timer: timeoutTimer)",
+    "}",
+  ].join("\n");
+  withRepo({ "s.swift": src }, (dir) => {
+    assert.equal(lintSwift(dir, ["s.swift"]).length, 0, "escaping local must not fire");
+  });
+});
+
+test("swift lint: a self-property timer that IS invalidated does not fire", () => {
+  const src = [
+    "final class P {",
+    "  var t: Timer?",
+    "  func go() { self.t = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in } }",
+    "  func stop() { self.t?.invalidate() }",
+    "}",
+  ].join("\n");
+  withRepo({ "t.swift": src }, (dir) => {
+    assert.equal(lintSwift(dir, ["t.swift"]).length, 0);
   });
 });

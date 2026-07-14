@@ -31,30 +31,49 @@ interface RawHit {
   evidenceLine: string;
 }
 
-/** R1: a Timer stored in a property that is never invalidate()d in this file. */
+// A timer bound to a stored PROPERTY (`self.x = …` or `x.y = …`) leaks for the
+// owning object's lifetime if never torn down. A timer bound to a local `let`/`var`
+// is only a leak here if it does NOT escape the function — once it is `return`ed or
+// handed to an initializer/call (e.g. wrapped in a lifecycle box, as CodexBar's
+// SubprocessRunner does), its teardown is the receiver's responsibility, not this
+// scope's, and flagging it is a false positive on a hard-fail rule. So: fire on a
+// property target always; fire on a local only when it does not escape.
+function bindingEscapes(target: string, joined: string): boolean {
+  // returned, or passed as an argument into a call/initializer
+  return (
+    new RegExp(`\\breturn\\b[^\\n]*\\b${target}\\b`).test(joined) ||
+    new RegExp(`\\(\\s*[^)]*\\b${target}\\b`).test(joined.replace(new RegExp(`\\b${target}\\s*=`), "")) ||
+    new RegExp(`:\\s*${target}\\b`).test(joined) // labeled initializer arg, e.g. TimeoutTimer(timer: timeoutTimer)
+  );
+}
+function isPropertyTarget(text: string): boolean {
+  // LHS is a member access (self.x / obj.field), not a bare local declaration.
+  const lhs = text.split("=")[0];
+  return /\.\w+\s*$/.test(lhs.trim()) && !/\b(let|var)\s+\w+\s*$/.test(lhs.trim());
+}
+
+/** R1: a Timer bound to a stored property (or a non-escaping local) never invalidate()d. */
 function ruleTimerNeverInvalidated(lines: string[]): RawHit[] {
   const hits: RawHit[] = [];
   const joined = lines.join("\n");
   lines.forEach((text, i) => {
-    // `self.timer = Timer.scheduledTimer(...)` / `foo = Timer(timeInterval:...)`
     const m = text.match(/(\w+)\s*=\s*Timer(?:\.scheduledTimer|\s*\()/);
     if (!m) return;
     const target = m[1];
-    if (/\.invalidate\s*\(/.test(joined) && new RegExp(`${target}[?!]?\\.invalidate`).test(joined)) return;
-    if (!/\.invalidate\s*\(/.test(joined)) {
-      hits.push({
-        line: i + 1,
-        ruleId: "timer-never-invalidated",
-        kind: "timer-leak",
-        summary: `Timer stored in '${target}' is never invalidate()d in this file — it retains its target and fires for the object's lifetime`,
-        evidenceLine: text.trim(),
-      });
-    }
+    if (new RegExp(`${target}[?!]?\\.invalidate\\s*\\(`).test(joined)) return;
+    if (!isPropertyTarget(text) && bindingEscapes(target, joined)) return; // owned elsewhere
+    hits.push({
+      line: i + 1,
+      ruleId: "timer-never-invalidated",
+      kind: "timer-leak",
+      summary: `Timer stored in '${target}' is never invalidate()d in this file — it retains its target and fires for the object's lifetime`,
+      evidenceLine: text.trim(),
+    });
   });
   return hits;
 }
 
-/** R2: a DispatchSource timer stored but never cancel()ed. */
+/** R2: a DispatchSource timer bound to a stored property (or non-escaping local) never cancel()ed. */
 function ruleDispatchSourceNeverCancelled(lines: string[]): RawHit[] {
   const hits: RawHit[] = [];
   const joined = lines.join("\n");
@@ -63,6 +82,7 @@ function ruleDispatchSourceNeverCancelled(lines: string[]): RawHit[] {
     if (!m) return;
     const target = m[1];
     if (new RegExp(`${target}[?!]?\\.cancel\\s*\\(`).test(joined)) return;
+    if (!isPropertyTarget(text) && bindingEscapes(target, joined)) return; // owned elsewhere
     hits.push({
       line: i + 1,
       ruleId: "dispatchsource-timer-never-cancelled",
