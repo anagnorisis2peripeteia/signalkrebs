@@ -182,7 +182,7 @@ export const swiftTsanAdapter: DetectorAdapter = {
     };
   },
 
-  lint(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[] {
+  lint(repoDir: string, touchedRanges: string[], _opts?: { skipTypeAware?: boolean }): ConcurrencyDefect[] {
     return lintSwift(repoDir, touchedRanges);
   },
 

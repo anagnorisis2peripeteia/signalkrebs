@@ -229,8 +229,8 @@ export const tsAsyncAdapter: DetectorAdapter = {
     };
   },
 
-  lint(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[] {
-    return lintTs(repoDir, touchedRanges);
+  lint(repoDir: string, touchedRanges: string[], opts?: { skipTypeAware?: boolean }): ConcurrencyDefect[] {
+    return lintTs(repoDir, touchedRanges, opts);
   },
 
   runLiveness(config: DetectorConfig): LivenessEvidence {

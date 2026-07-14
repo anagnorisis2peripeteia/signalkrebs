@@ -189,7 +189,7 @@ export const goRaceAdapter: DetectorAdapter = {
     };
   },
 
-  lint(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[] {
+  lint(repoDir: string, touchedRanges: string[], _opts?: { skipTypeAware?: boolean }): ConcurrencyDefect[] {
     return lintGo(repoDir, touchedRanges);
   },
 

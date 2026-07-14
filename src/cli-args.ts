@@ -71,6 +71,9 @@ export function parseCliArgs(argv: string[]): CliArgs {
       case "--lint-only":
         config.lintOnly = true;
         break;
+      case "--fast-lint":
+        config.skipTypeAware = true;
+        break;
       case "--report-file":
         config.reportFile = next();
         break;

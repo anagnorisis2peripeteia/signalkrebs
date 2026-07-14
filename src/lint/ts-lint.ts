@@ -104,12 +104,14 @@ const CUSTOM_RULES = [ruleIntervalNeverCleared, ruleGlobalListenerNeverRemoved];
  * every file; type-aware `no-floating-promises` only where the repo has a
  * tsconfig.json (type info is required and comes from the repo's own project).
  */
-function runEslint(repoDir: string, files: string[]): Map<string, RawHit[]> {
+function runEslint(repoDir: string, files: string[], skipTypeAware: boolean): Map<string, RawHit[]> {
   const out = new Map<string, RawHit[]>();
   if (files.length === 0) return out;
   const hasTsconfig = existsSync(join(repoDir, "tsconfig.json"));
   const tsFiles = files.filter((f) => TS_EXT.test(f));
-  const wantTypeAware = hasTsconfig && tsFiles.length > 0;
+  // Type-aware no-floating-promises needs the whole TS project loaded; skip it for
+  // fast whole-repo discovery (require-atomic-updates + the regex leak rules still run).
+  const wantTypeAware = hasTsconfig && tsFiles.length > 0 && !skipTypeAware;
 
   const cfgDir = mkdtempSync(join(tmpdir(), "sk-eslint-"));
   const cfgPath = join(cfgDir, "sk.config.mjs");
@@ -192,7 +194,7 @@ export default [
   return out;
 }
 
-export function lintTs(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[] {
+export function lintTs(repoDir: string, touchedRanges: string[], opts?: { skipTypeAware?: boolean }): ConcurrencyDefect[] {
   const defects: ConcurrencyDefect[] = [];
   const byFile = new Map<string, Array<[number, number] | null>>();
 
@@ -206,7 +208,7 @@ export function lintTs(repoDir: string, touchedRanges: string[]): ConcurrencyDef
   }
   if (byFile.size === 0) return defects;
 
-  const eslintHits = runEslint(repoDir, [...byFile.keys()]);
+  const eslintHits = runEslint(repoDir, [...byFile.keys()], opts?.skipTypeAware ?? false);
 
   for (const [file, ranges] of byFile) {
     let text: string;

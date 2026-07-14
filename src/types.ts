@@ -158,9 +158,10 @@ export interface DetectorAdapter {
   /**
    * Static anti-pattern scan, scoped to the touched LINE RANGES. Honors the
    * `// concurrency-ok: <reason>` suppression pragma. Hits on touched lines are
-   * hard-failing per gate policy; suppressed hits are retained but inert.
+   * hard-failing per gate policy; suppressed hits are retained but inert. `opts`
+   * carries lane-relevant knobs (e.g. skipTypeAware for a fast whole-repo sweep).
    */
-  lint(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[];
+  lint(repoDir: string, touchedRanges: string[], opts?: { skipTypeAware?: boolean }): ConcurrencyDefect[];
 
   /**
    * Prove the lane is live: run the detector against this adapter's planted-defect
@@ -197,6 +198,14 @@ export interface DetectorConfig {
    * local check. Verdict is `defect` on any un-suppressed hit, else `clean`.
    */
   lintOnly?: boolean;
+  /**
+   * Skip type-aware lint rules (ts-async's no-floating-promises, which loads the
+   * repo's whole TS project per batch). For whole-monorepo discovery this is the
+   * difference between seconds and ~40 minutes; the diff-scoped gate keeps type
+   * info. The type-independent rules (require-atomic-updates, the leak rules) still
+   * run.
+   */
+  skipTypeAware?: boolean;
   /** Path for the JSON result artifact (written before exit-code evaluation). */
   reportFile?: string;
   /** Swift-lane fixture/target plumbing, filled per adapter as needed. */

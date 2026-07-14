@@ -177,7 +177,7 @@ export function runConcurrencyAnalysis(
   // Verdict is `defect` on any un-suppressed anti-pattern hit, else `clean`.
   // Used by the hunt for a free repo-wide pre-filter and for a fast local check.
   if (config.lintOnly) {
-    const lintDefects = adapter.lint(repoDir, touchedRanges);
+    const lintDefects = adapter.lint(repoDir, touchedRanges, { skipTypeAware: config.skipTypeAware });
     const active = lintDefects.filter((d) => !d.suppressed);
     return {
       detector: config.tool,
@@ -208,7 +208,7 @@ export function runConcurrencyAnalysis(
 
     const exercise = adapter.resolveExercise(repoDir, touchedFiles);
     const { defects: dynamicDefects, exec } = adapter.runDetector(repoDir, exercise, config);
-    const lintDefects = adapter.lint(repoDir, touchedRanges);
+    const lintDefects = adapter.lint(repoDir, touchedRanges, { skipTypeAware: config.skipTypeAware });
 
     const execError =
       exec.spawnError !== null
