@@ -41,6 +41,7 @@ interface RawHit {
   kind: ConcurrencyDefect["kind"];
   summary: string;
   evidenceLine: string;
+  advisory?: boolean;
 }
 
 /** R1: setInterval stored on a property (this.x/obj.field) never cleared in this file. */
@@ -178,6 +179,9 @@ export default [
             ? `check-then-act across an await: ${msg.message}`
             : `floating promise: ${msg.message}`,
           evidenceLine: msg.message,
+          // require-atomic-updates is a heuristic (over-fires on local-let
+          // reassignment and idempotent ref writes) — advisory, not hard-fail.
+          advisory: isRace,
         });
       }
       if (hits.length) out.set(rel, hits);
@@ -232,6 +236,7 @@ export function lintTs(repoDir: string, touchedRanges: string[]): ConcurrencyDef
         summary: hit.summary,
         evidence: `[${hit.ruleId}] ${file}:${hit.line}\n    ${hit.evidenceLine}`,
         ruleId: hit.ruleId,
+        advisory: hit.advisory,
         suppressed: reason !== undefined,
         suppressionReason: reason,
       });

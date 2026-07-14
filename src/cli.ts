@@ -68,7 +68,7 @@ function main(): void {
   console.error(`[signalkrebs] ${verdictSummary(result)}`);
   if (result.error) console.error(`[signalkrebs] ${result.error}`);
   for (const d of result.defects) {
-    const tag = d.suppressed ? "SUPPRESSED" : d.kind.toUpperCase();
+    const tag = d.suppressed ? "SUPPRESSED" : d.advisory ? "ADVISORY" : d.kind.toUpperCase();
     console.error(`\n[${tag}] ${d.file}:${d.line} — ${d.summary}`);
     if (d.suppressed) console.error(`    (concurrency-ok: ${d.suppressionReason})`);
     else console.error(d.evidence.split("\n").map((l) => "    " + l).join("\n"));

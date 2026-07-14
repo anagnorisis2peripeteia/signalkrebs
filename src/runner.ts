@@ -68,7 +68,9 @@ export function reconcileVerdict(
     };
   }
 
-  const active = defects.filter((d) => !d.suppressed);
+  // Advisory findings (heuristic rules like require-atomic-updates) are surfaced
+  // for discovery but do not hard-fail the gate; only precision-first findings do.
+  const active = defects.filter((d) => !d.suppressed && !d.advisory);
   if (active.length > 0) {
     return { ...base, verdict: "defect" };
   }

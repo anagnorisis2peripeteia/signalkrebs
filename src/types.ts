@@ -57,6 +57,15 @@ export interface ConcurrencyDefect {
   /** Static lint only: the rule that fired (e.g. "timer-without-stop"). */
   ruleId?: string;
   /**
+   * Advisory findings are surfaced (they drive the hunt's discovery) but do NOT
+   * hard-fail the gate — reserved for heuristic rules too false-positive-prone to
+   * block a PR, e.g. eslint `require-atomic-updates`, which over-fires on local
+   * `let` reassignments and idempotent ref writes (both seen dogfooding clawrouter).
+   * Precision-first rules (type-aware no-floating-promises, the leak rules) are NOT
+   * advisory and do hard-fail.
+   */
+  advisory?: boolean;
+  /**
    * True when a `// concurrency-ok: <reason>` pragma on or immediately above the
    * line suppressed this finding. Suppressed findings are retained for the report
    * but do not contribute to the `defect` verdict.

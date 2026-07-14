@@ -43,6 +43,14 @@ test("reconcile: suppressed defects do NOT drive the verdict", () => {
   assert.equal(r.verdict, "clean");
 });
 
+test("reconcile: advisory findings (e.g. require-atomic-updates) do NOT hard-fail", () => {
+  // The clawrouter dogfood lesson: require-atomic-updates over-fires; it is
+  // surfaced for the hunt but must not block the gate.
+  const d = [{ kind: "toctou", source: "static", file: "a.ts", line: 9, summary: "", evidence: "", advisory: true }];
+  const r = reconcileVerdict("ts-async", d, exercise(), live, null, { ...cfg, tool: "ts-async" });
+  assert.equal(r.verdict, "clean");
+});
+
 test("reconcile: unexercised touched code is insufficient (fail-closed)", () => {
   const r = reconcileVerdict("go-race", [], exercise({ unexercisedPackages: ["p"] }), live, null, cfg);
   assert.equal(r.verdict, "insufficient");
