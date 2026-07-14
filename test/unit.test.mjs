@@ -11,6 +11,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { reconcileVerdict } = await import(pathToFileURL(join(ROOT, "dist/runner.js")).href);
 const { lintGo } = await import(pathToFileURL(join(ROOT, "dist/lint/go-lint.js")).href);
 const { lintSwift } = await import(pathToFileURL(join(ROOT, "dist/lint/swift-lint.js")).href);
+const { lintTs } = await import(pathToFileURL(join(ROOT, "dist/lint/ts-lint.js")).href);
 const { parseScopeEntry } = await import(pathToFileURL(join(ROOT, "dist/git-changed-files.js")).href);
 
 function exercise(over) {
@@ -196,5 +197,55 @@ test("swift lint: a self-property timer that IS invalidated does not fire", () =
   ].join("\n");
   withRepo({ "t.swift": src }, (dir) => {
     assert.equal(lintSwift(dir, ["t.swift"]).length, 0);
+  });
+});
+
+// --- TS/JS async-safety lint (custom leak rules; ESLint rules covered by the lane validator) ---
+
+test("ts lint: a field setInterval never cleared fires", () => {
+  const src = [
+    "class Poller {",
+    "  start() { this.h = setInterval(() => {}, 1000); }",
+    "}",
+  ].join("\n");
+  withRepo({ "p.js": src }, (dir) => {
+    const hits = lintTs(dir, ["p.js"]).filter((d) => !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].ruleId, "interval-never-cleared");
+  });
+});
+
+test("ts lint: a field setInterval that IS cleared does not fire", () => {
+  const src = [
+    "class Poller {",
+    "  start() { this.h = setInterval(() => {}, 1000); }",
+    "  stop() { clearInterval(this.h); }",
+    "}",
+  ].join("\n");
+  withRepo({ "p.js": src }, (dir) => {
+    assert.equal(lintTs(dir, ["p.js"]).length, 0);
+  });
+});
+
+test("ts lint: // concurrency-ok suppresses a TS leak hit", () => {
+  const src = [
+    "class Poller {",
+    "  start() {",
+    "    // concurrency-ok: cleared by the DI container on dispose",
+    "    this.h = setInterval(() => {}, 1000);",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "p.js": src }, (dir) => {
+    const hits = lintTs(dir, ["p.js"]);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].suppressed, true);
+  });
+});
+
+test("ts lint: test files are not scanned", () => {
+  const src = "class Poller { start() { this.h = setInterval(() => {}, 1000); } }";
+  withRepo({ "p.test.js": src }, (dir) => {
+    assert.equal(lintTs(dir, ["p.test.js"]).length, 0);
   });
 });

@@ -1,0 +1,8 @@
+{
+  "name": "sk-ts-async-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test/planted.test.mjs"
+  }
+}

@@ -41,6 +41,16 @@ const SPECS = {
     cleanChanged: ["Sources/Counter/Counter.swift"],
     config: {},
   },
+  "ts-async": {
+    toolchain: "node",
+    racyFixture: "fixtures/ts-async",
+    racyChanged: ["src/cache.js"],
+    cleanFixture: "fixtures/ts-clean-js",
+    cleanChanged: ["src/cache.js"],
+    config: { timeoutMs: 20000 },
+    // static hits anchor in cache.js; the dynamic leak anchors at package.json
+    anchorAny: ["cache.js", "package.json"],
+  },
 };
 
 function haveBinary(bin) {
@@ -74,10 +84,10 @@ function validate(tool, spec) {
   );
   if (racy.verdict !== "defect") return fail(tool, `planted race NOT caught (verdict=${racy.verdict})`, racy.error);
   if (!racy.liveness.plantedDefectCaught) return fail(tool, "liveness fixture did not catch its planted race");
-  const anchorBase = spec.racyChanged[0].split("/").pop(); // e.g. counter.go | Counter.swift
-  const anchored = racy.defects.some((d) => d.kind === "data-race" && d.file.includes(anchorBase));
-  if (!anchored) return fail(tool, `race not anchored in ${anchorBase}`, JSON.stringify(racy.defects, null, 1));
-  pass(`planted race caught, anchored in ${anchorBase}, liveness live`);
+  const anchors = spec.anchorAny ?? [spec.racyChanged[0].split("/").pop()];
+  const anchored = racy.defects.some((d) => !d.suppressed && anchors.some((a) => d.file.includes(a)));
+  if (!anchored) return fail(tool, `defect not anchored in ${anchors.join("|")}`, JSON.stringify(racy.defects, null, 1));
+  pass(`planted defect caught, anchored in ${anchors.join("|")}, liveness live`);
 
   // SPEC 2 — clean neighbour not flagged.
   const clean = runConcurrencyAnalysis(

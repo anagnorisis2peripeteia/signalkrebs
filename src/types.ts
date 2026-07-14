@@ -7,9 +7,9 @@
 // was actually EXERCISED under parallelism, and nothing surfaced within the
 // stress budget. Every degenerate state is an explicit non-passing verdict.
 
-export type DetectorTool = "go-race" | "swift-tsan";
+export type DetectorTool = "go-race" | "swift-tsan" | "ts-async";
 
-export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan"];
+export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan", "ts-async"];
 
 /** Terminal verdicts, most-benign first. Only `clean` exits 0. */
 export type Verdict =
@@ -83,7 +83,12 @@ export interface ExerciseEvidence {
   stress: {
     /** `-count=N` repetitions (Go) or equivalent rerun count. */
     reps: number;
-    /** GOMAXPROCS values swept; a run pinned to 1 cannot expose a real race. */
+    /**
+     * Parallelism the detector ran under. Go: GOMAXPROCS values swept. Swift:
+     * host cores. ts-async: host cores (the event loop is single-threaded; the
+     * value records that real async interleaving, not a mocked scheduler, ran).
+     * A run that never reached >=2 cannot claim a concurrency-clean verdict.
+     */
     gomaxprocs: number[];
   };
 }

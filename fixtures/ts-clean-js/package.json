@@ -1,0 +1,8 @@
+{
+  "name": "sk-ts-clean-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test/clean.test.mjs"
+  }
+}
