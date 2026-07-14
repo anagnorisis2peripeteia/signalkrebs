@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.signalkrebs.lock
+.DS_Store
+
+# Swift/Go build artifacts (never commit)
+.build/
+.swiftpm/
+DerivedData/
+fixtures/**/.build/

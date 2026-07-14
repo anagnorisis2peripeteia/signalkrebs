@@ -1,0 +1,150 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const { reconcileVerdict } = await import(pathToFileURL(join(ROOT, "dist/runner.js")).href);
+const { lintGo } = await import(pathToFileURL(join(ROOT, "dist/lint/go-lint.js")).href);
+const { parseScopeEntry } = await import(pathToFileURL(join(ROOT, "dist/git-changed-files.js")).href);
+
+function exercise(over) {
+  return {
+    touchedPackages: ["p"],
+    exercisedPackages: ["p"],
+    unexercisedPackages: [],
+    stress: { reps: 20, gomaxprocs: [2, 8] },
+    ...over,
+  };
+}
+const live = { checked: true, plantedDefectCaught: true, detail: "" };
+const cfg = { tool: "go-race" };
+
+test("reconcile: clean when exercised, live, no defects", () => {
+  const r = reconcileVerdict("go-race", [], exercise(), live, null, cfg);
+  assert.equal(r.verdict, "clean");
+});
+
+test("reconcile: a defect fails even if coverage is thin", () => {
+  const d = [{ kind: "data-race", source: "dynamic", file: "a.go", line: 1, summary: "", evidence: "" }];
+  const r = reconcileVerdict("go-race", d, exercise({ unexercisedPackages: ["p"] }), live, null, cfg);
+  assert.equal(r.verdict, "defect");
+});
+
+test("reconcile: suppressed defects do NOT drive the verdict", () => {
+  const d = [{ kind: "anti-pattern", source: "static", file: "a.go", line: 1, summary: "", evidence: "", suppressed: true }];
+  const r = reconcileVerdict("go-race", d, exercise(), live, null, cfg);
+  assert.equal(r.verdict, "clean");
+});
+
+test("reconcile: unexercised touched code is insufficient (fail-closed)", () => {
+  const r = reconcileVerdict("go-race", [], exercise({ unexercisedPackages: ["p"] }), live, null, cfg);
+  assert.equal(r.verdict, "insufficient");
+});
+
+test("reconcile: --allow-unexercised lets the gap pass", () => {
+  const r = reconcileVerdict("go-race", [], exercise({ unexercisedPackages: ["p"] }), live, null, { ...cfg, allowUnexercised: true });
+  assert.equal(r.verdict, "clean");
+});
+
+test("reconcile: GOMAXPROCS pinned to 1 is insufficient (no parallelism)", () => {
+  const r = reconcileVerdict("go-race", [], exercise({ stress: { reps: 20, gomaxprocs: [1] } }), live, null, cfg);
+  assert.equal(r.verdict, "insufficient");
+});
+
+test("reconcile: a lane that missed its planted race is lane-dead", () => {
+  const dead = { checked: true, plantedDefectCaught: false, detail: "missed" };
+  const r = reconcileVerdict("go-race", [], exercise(), dead, null, cfg);
+  assert.equal(r.verdict, "lane-dead");
+});
+
+test("reconcile: exec error outranks everything", () => {
+  const r = reconcileVerdict("go-race", [], exercise(), live, "spawn failed", cfg);
+  assert.equal(r.verdict, "error");
+});
+
+test("parseScopeEntry: file:range and whole-file", () => {
+  assert.deepEqual(parseScopeEntry("a/b.go:10-20"), { file: "a/b.go", start: 10, end: 20 });
+  assert.deepEqual(parseScopeEntry("a/b.go"), { file: "a/b.go" });
+});
+
+// --- lint rules over a scratch repo ---
+function withRepo(files, fn) {
+  const dir = mkdtempSync(join(tmpdir(), "sk-lint-"));
+  try {
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("lint: timer-without-stop fires on a touched line, not off it", () => {
+  const src = [
+    "package p",
+    "import \"time\"",
+    "type S struct{ t *time.Ticker }",
+    "func New() *S { s := &S{}; s.t = time.NewTicker(time.Second); return s }",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const onLine = lintGo(dir, ["s.go:4-4"]);
+    assert.equal(onLine.filter((d) => !d.suppressed).length, 1);
+    assert.equal(onLine[0].ruleId, "timer-without-stop");
+    const offLine = lintGo(dir, ["s.go:1-2"]);
+    assert.equal(offLine.length, 0, "hit outside the touched range must not fire");
+  });
+});
+
+test("lint: // concurrency-ok suppresses the hit", () => {
+  const src = [
+    "package p",
+    "import \"time\"",
+    "type S struct{ t *time.Ticker }",
+    "func New() *S {",
+    "  s := &S{}",
+    "  // concurrency-ok: stopped in Close()",
+    "  s.t = time.NewTicker(time.Second)",
+    "  return s",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const hits = lintGo(dir, ["s.go:1-9"]);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].suppressed, true);
+    assert.match(hits[0].suppressionReason, /Close/);
+  });
+});
+
+test("lint: a stopped ticker is not flagged", () => {
+  const src = [
+    "package p",
+    "import \"time\"",
+    "type S struct{ t *time.Ticker }",
+    "func New() *S { s := &S{}; s.t = time.NewTicker(time.Second); return s }",
+    "func (s *S) Close() { s.t.Stop() }",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["s.go:1-5"]).length, 0);
+  });
+});
+
+test("lint: range-over-ticker with no exit fires", () => {
+  const src = [
+    "package p",
+    "import \"time\"",
+    "func run(t *time.Ticker) {",
+    "  for range t.C {",
+    "    println(\"tick\")",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "r.go": src }, (dir) => {
+    const hits = lintGo(dir, ["r.go:4-4"]);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].ruleId, "range-over-ticker-no-exit");
+  });
+});

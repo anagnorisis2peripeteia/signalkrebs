@@ -1,0 +1,24 @@
+{
+  "name": "signalkrebs",
+  "version": "0.1.0",
+  "description": "PR-scoped concurrency gate: runs a language's race/leak detector under a stress budget on the lines a PR touched, plus a hard-failing anti-pattern lint, and fails closed on any degenerate state.",
+  "type": "module",
+  "bin": {
+    "signalkrebs": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "lint": "node scripts/lint.mjs",
+    "validate:detector": "node scripts/validate-detector.mjs",
+    "validate:detectors": "node scripts/validate-detector.mjs --all"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.0"
+  }
+}
