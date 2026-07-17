@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ConcurrencyDefect } from "../types.js";
 import { parseScopeEntry } from "../git-changed-files.js";
+import { controlTransferBetween, sharesResource } from "./cutover-core.js";
 
 // Static anti-pattern rules for Go. These HARD-FAIL the gate on a touched line
 // (per gate policy), so every rule here is chosen to be high-precision: a hit is
@@ -164,13 +165,8 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
     "create", "new", "dial", "acquire", "open", "start", "register", "provision", "prepare", "connect", "mint", "reserve",
     "err", "nil", "ctx", "context", "return", "var", "func", "defer", "the", "and", "for",
   ]);
-  const identsOf = (s: string) =>
-    new Set((s.match(/\b[a-zA-Z_]\w{2,}\b/g) ?? []).map((w) => w.toLowerCase()).filter((w) => !CUTOVER_STOP.has(w)));
-  const sharesResource = (destroy: string, acquire: string) => {
-    const b = identsOf(acquire);
-    for (const x of identsOf(destroy)) if (b.has(x)) return true;
-    return false;
-  };
+  // sharesResource + the return/throw-between gate come from the shared cutover core (signalkrebs
+  // #16); CUTOVER_STOP is Go's own stopword set, passed through so behaviour is unchanged.
   // Any call that could plausibly restore/re-create the just-destroyed thing —
   // if one appears between the destructive call and the acquisition, abstain.
   const RESTART_RE = /\b(start|restart|reopen|reconnect|recreate|restore|revive|renew)\w*\s*\(/i;
@@ -237,18 +233,11 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
       }
       if (restartSeen) continue;
 
-      // If control RETURNS between the destroy and the acquisition, the destroy is on a guard/error
-      // bail-out path (cleanup before returning) — mutually exclusive with the acquisition, which is
-      // on a different path. The real cutover shape is destroy→acquire on one straight line, with the
-      // bail AFTER the acquire. (discrawl tail_failure_fallback.go: `_ = root.Close(); return …`.)
-      let returnsBeforeAcquire = false;
-      for (let j = i + 1; j < acquireLine; j++) {
-        if (/\breturn\b/.test(lines[j])) {
-          returnsBeforeAcquire = true;
-          break;
-        }
-      }
-      if (returnsBeforeAcquire) continue;
+      // If control RETURNS/THROWS between the destroy and the acquisition, the destroy is on a
+      // guard/error bail-out path (cleanup before returning) — mutually exclusive with the
+      // acquisition on a different path. The real cutover shape is destroy→acquire on one straight
+      // line, with the bail AFTER the acquire. (discrawl tail_failure_fallback.go.)
+      if (controlTransferBetween(lines, i, acquireLine)) continue;
 
       // The acquisition's error path must bail (return) within a few lines.
       const errCheckEnd = Math.min(end, acquireLine + ERR_CHECK_WINDOW);
@@ -273,7 +262,7 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
       if (!hasReturn) continue;
 
       // #2 precision: don't fire on an UNRELATED teardown+setup (they must share a resource ident).
-      if (!sharesResource(destructiveLine, lines[acquireLine])) continue;
+      if (!sharesResource(destructiveLine, lines[acquireLine], CUTOVER_STOP)) continue;
 
       // If the destroyed variable is REASSIGNED between the Close and the acquisition, the acquire
       // operates on a DIFFERENT object that merely reuses the name — not a use-after-destroy. This is

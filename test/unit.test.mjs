@@ -575,7 +575,7 @@ test("ts lint: type-aware no-floating-promises is caught end-to-end", () => {
 test("swift lint: unsafe-cutover fires on teardown before a fallible try-acquire", () => {
   const src = [
     "func cutover() throws {",
-    "  self.timer.invalidate()",
+    "  self.conn.close()",
     "  let fresh = try makeConnection()",
     "  self.conn = fresh",
     "}",

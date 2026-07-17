@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ConcurrencyDefect } from "../types.js";
 import { parseScopeEntry } from "../git-changed-files.js";
+import { type ReassignCutoverConfig, detectReassignCutover } from "./cutover-core.js";
 
 // Static async-safety rules for TypeScript/JavaScript. JS is single-threaded, so
 // the bug classes differ from Go/Swift: the "race" is check-then-act across an
@@ -136,75 +137,17 @@ function ruleGlobalListenerNeverRemoved(lines: string[]): RawHit[] {
  * rejects, the torn-down resource is gone and unrestored. Acquire/confirm the replacement
  * before destroying the incumbent. Abstains on a restart between the teardown and the
  * acquisition or in the failure path just after it. */
+// TS/JS cutover: the acquisition is a fallible `await`, the failure a rejection. Delegates to the
+// shared reassign-slot core (signalkrebs #16) so the precision gates stay in one place.
+const TS_CUTOVER_CFG: ReassignCutoverConfig = {
+  teardownRe: /([\w.$]+)\.(?:stop|close|cancel|destroy|teardown|dispose|shutdown|abort|kill|unregister|revoke)\w*\s*\(/i,
+  declRe: /\b(?:const|let|var)\s+(\w+)\s*=\s*await\b/,
+  acquireAssignRe: /=\s*await\b/,
+  restartRe: /\b(?:start|restart|reopen|reconnect|recreate|restore|revive|renew|reprovision|reacquire)\w*\s*\(/i,
+  isInStringLiteral,
+};
 function ruleUnsafeCutover(lines: string[]): RawHit[] {
-  const hits: RawHit[] = [];
-  // The destroyed SLOT is the receiver chain before the teardown method: `this.socket.close()` → R.
-  const DESTRUCTIVE_RE = /([\w.$]+)\.(?:stop|close|cancel|destroy|teardown|dispose|shutdown|abort|kill|unregister|revoke)\w*\s*\(/i;
-  const AWAIT_DECL_RE = /\b(?:const|let|var)\s+(\w+)\s*=\s*await\b/; // form A: `const V = await …`
-  const RESTART_RE = /\b(?:start|restart|reopen|reconnect|recreate|restore|revive|renew|reprovision|reacquire)\w*\s*\(/i;
-  const WINDOW = 15;
-  const REASSIGN_WINDOW = 6;
-  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-  lines.forEach((text, i) => {
-    const dm = text.match(DESTRUCTIVE_RE);
-    if (!dm) return;
-    if (isInStringLiteral(text, text.search(DESTRUCTIVE_RE))) return; // codegen inside a string, not a call
-    const slot = dm[1]; // e.g. "this.socket", "target.handle"
-    // Reassignment of the destroyed slot (not `==`/`===`/`=>`): the tell of a genuine cutover.
-    const reassignRe = new RegExp(`(?:^|[^.\\w])${esc(slot)}\\s*=[^=>]`);
-    const windowEnd = Math.min(lines.length - 1, i + WINDOW);
-
-    let depth = 0; // brace depth relative to the destroy's block
-    for (let j = i + 1; j <= windowEnd; j++) {
-      const L = lines[j];
-      // Once we close out of the block that contained the destroy, stop. Anything past it is a
-      // sibling block or a later function, where a reused variable NAME is a different binding — not
-      // a reassignment of the torn-down slot. (This is what made close()-in-finally + a later
-      // function reusing the name look like a cutover: Kova, fs-safe, mcporter examples.)
-      const delta = (L.match(/{/g) || []).length - (L.match(/}/g) || []).length;
-      if (depth + delta < 0) return;
-      depth += delta;
-      if (RESTART_RE.test(L)) return; // re-created before the acquisition → safe
-      if (/\b(?:return|throw)\b/.test(L)) return; // a bail path sits between → different control-flow path
-      const acquires = /=\s*await\b/.test(L);
-
-      // Form B — the destroyed slot itself is reassigned via an await: `this.socket = await dial()`.
-      // If that await rejects, the slot is torn down and never replaced. Direct, high-precision.
-      if (acquires && reassignRe.test(L)) {
-        hits.push(mkCutover(text, i, j));
-        return;
-      }
-      // Form A — `const V = await acquire()` then `this.socket = …V…` a few lines later. The link is
-      // the destroyed slot being reassigned to the acquired value; without it, this is just an
-      // unrelated teardown+await (the overwhelmingly common shape — no bug).
-      const am = L.match(AWAIT_DECL_RE);
-      if (am) {
-        const v = am[1];
-        const vRe = new RegExp(`\\b${esc(v)}\\b`);
-        const reEnd = Math.min(lines.length - 1, j + REASSIGN_WINDOW);
-        for (let k = j + 1; k <= reEnd; k++) {
-          if (RESTART_RE.test(lines[k])) return; // failure path restores → safe
-          if (reassignRe.test(lines[k]) && vRe.test(lines[k])) {
-            hits.push(mkCutover(text, i, j));
-            return;
-          }
-        }
-        return; // an await-acquire not fed back into the destroyed slot → not this bug
-      }
-    }
-  });
-  return hits;
-
-  function mkCutover(text: string, i: number, acquireLine: number): RawHit {
-    return {
-      line: i + 1,
-      ruleId: "destructive-before-confirm",
-      kind: "unsafe-cutover",
-      summary: `destructive teardown of '${text.trim().slice(0, 60)}' runs before the awaited acquisition on line ${acquireLine + 1} whose value replaces it; if it rejects, the torn-down resource is gone and unrestored — acquire/confirm the replacement before destroying the incumbent`,
-      evidenceLine: text.trim(),
-    };
-  }
+  return detectReassignCutover(lines, TS_CUTOVER_CFG).map((h) => ({ ...h, kind: h.kind as RawHit["kind"] }));
 }
 
 const CUSTOM_RULES = [ruleIntervalNeverCleared, ruleGlobalListenerNeverRemoved, ruleUnsafeCutover];

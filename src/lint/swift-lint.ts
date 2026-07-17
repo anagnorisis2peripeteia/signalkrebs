@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ConcurrencyDefect } from "../types.js";
 import { parseScopeEntry } from "../git-changed-files.js";
+import { type ReassignCutoverConfig, detectReassignCutover } from "./cutover-core.js";
 
 // Static anti-pattern rules for Swift. Like the Go set, these HARD-FAIL on a
 // touched line, so each is high-precision. Swift 6's actor/Sendable checking
@@ -100,40 +101,17 @@ function ruleDispatchSourceNeverCancelled(lines: string[]): RawHit[] {
  * acquisition throws, the torn-down resource is gone and unrestored. Acquire/confirm the
  * replacement before destroying the incumbent. Abstains when a restart/re-acquire appears
  * between the teardown and the acquisition, or in the failure path just after it. */
+// Swift cutover: the acquisition is a fallible `try`, the failure a thrown error. Delegates to the
+// shared reassign-slot core (signalkrebs #16) — the same precision gates as the TS lane, which this
+// rule previously lacked (it was the naive pre-hardening version).
+const SWIFT_CUTOVER_CFG: ReassignCutoverConfig = {
+  teardownRe: /([\w.$]+)\.(?:stop|invalidate|cancel|close|teardown|dispose|shutdown|deactivate|kill)\w*\s*\(/i,
+  declRe: /\b(?:let|var)\s+(\w+)\s*=\s*try\b/,
+  acquireAssignRe: /=\s*try\b/,
+  restartRe: /\b(?:start|restart|reopen|reconnect|recreate|restore|revive|renew|reactivate)\w*\s*\(/i,
+};
 function ruleUnsafeCutover(lines: string[]): RawHit[] {
-  const hits: RawHit[] = [];
-  const DESTRUCTIVE_RE = /\.(?:stop|invalidate|cancel|close|teardown|dispose|shutdown|deactivate|kill)\w*\s*\(/i;
-  const ACQUIRE_RE = /\b(?:let|var)\s+\w+\s*=\s*try\b/; // let x = try makeReplacement()
-  const RESTART_RE = /\b(?:start|restart|reopen|reconnect|recreate|restore|revive|renew|reactivate)\w*\s*\(/i;
-  const WINDOW = 15;
-  lines.forEach((text, i) => {
-    if (/\bfunc\b/.test(text)) return; // a `func stop(...)` definition, not a call
-    if (!DESTRUCTIVE_RE.test(text)) return;
-    const windowEnd = Math.min(lines.length - 1, i + WINDOW);
-    let acquireLine = -1;
-    for (let j = i + 1; j <= windowEnd; j++) {
-      if (RESTART_RE.test(lines[j])) return; // re-created between teardown and acquire → safe
-      if (ACQUIRE_RE.test(lines[j])) {
-        acquireLine = j;
-        break;
-      }
-    }
-    if (acquireLine === -1) return;
-    // Abstain if the failure path restores the torn-down thing (a restart within a few
-    // lines after the acquisition, e.g. in a `catch`).
-    const recoverEnd = Math.min(lines.length - 1, acquireLine + 5);
-    for (let j = acquireLine + 1; j <= recoverEnd; j++) {
-      if (RESTART_RE.test(lines[j])) return;
-    }
-    hits.push({
-      line: i + 1,
-      ruleId: "destructive-before-confirm",
-      kind: "unsafe-cutover",
-      summary: `destructive teardown runs before the fallible 'try' acquisition on line ${acquireLine + 1}; if it throws, the torn-down resource is gone and unrestored — acquire/confirm the replacement before destroying the incumbent`,
-      evidenceLine: text.trim(),
-    });
-  });
-  return hits;
+  return detectReassignCutover(lines, SWIFT_CUTOVER_CFG).map((h) => ({ ...h, kind: h.kind as RawHit["kind"] }));
 }
 
 const RULES = [ruleTimerNeverInvalidated, ruleDispatchSourceNeverCancelled, ruleUnsafeCutover];
