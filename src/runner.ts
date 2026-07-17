@@ -13,6 +13,7 @@ import {
 import { goRaceAdapter } from "./detectors/go-race.js";
 import { swiftTsanAdapter } from "./detectors/swift-tsan.js";
 import { tsAsyncAdapter } from "./detectors/ts-async.js";
+import { dotnetConcAdapter } from "./detectors/dotnet-conc.js";
 
 // A lane stays quarantined until its planted-defect fixture proves the detector
 // actually catches a race via scripts/validate-detector.mjs. Same discipline as
@@ -26,6 +27,7 @@ const ADAPTERS: Partial<Record<DetectorTool, DetectorAdapter>> = {
   "go-race": goRaceAdapter,
   "swift-tsan": swiftTsanAdapter,
   "ts-async": tsAsyncAdapter,
+  "dotnet-conc": dotnetConcAdapter,
 };
 
 /**

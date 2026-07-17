@@ -43,6 +43,7 @@ yet exits 0. signalkrebs closes that gap:
 |---|---|---|
 | `go-race` | `go test -race` (ThreadSanitizer) + goroutine/timer lint | **validated** (`npm run validate:detector go-race`) |
 | `swift-tsan` | Xcode Thread Sanitizer + Swift 6 concurrency | **validated** (`npm run validate:detector swift-tsan`) |
+| `dotnet-conc` | Roslyn semantic analyzer — sync-over-async (deadlock), `async void`, fire-and-forget `Task` | **validated** (`npm run validate:detector dotnet-conc`) |
 
 A lane stays in `runner.ts` `QUARANTINED_TOOLS` until its **planted-defect fixture** proves the
 detector actually catches a race on the host. This is the load-bearing discipline: a detector

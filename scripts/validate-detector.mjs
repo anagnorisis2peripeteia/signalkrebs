@@ -51,6 +51,14 @@ const SPECS = {
     // static hits anchor in cache.js; the dynamic leak anchors at package.json
     anchorAny: ["cache.js", "package.json"],
   },
+  "dotnet-conc": {
+    toolchain: "dotnet",
+    racyFixture: "fixtures/dotnet-conc",
+    racyChanged: ["Fixture.cs"],
+    cleanFixture: "fixtures/dotnet-clean",
+    cleanChanged: ["Fixture.cs"],
+    config: { timeoutMs: 120000 },
+  },
 };
 
 function haveBinary(bin) {
