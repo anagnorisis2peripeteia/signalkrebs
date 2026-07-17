@@ -705,3 +705,57 @@ test("lint: unsafe-cutover fires on a single-value acquisition sharing the resou
     assert.equal(hits.length, 1, "stopEgress then single-value startEgress, both on leaseID");
   });
 });
+
+// --- suppression-rot audit (#13) ---
+
+test("lint: suppression-rot flags a reasonless // concurrency-ok pragma", () => {
+  const src = [
+    "package p",
+    "import \"time\"",
+    "type S struct{ t *time.Ticker }",
+    "func New() *S {",
+    "  s := &S{}",
+    "  // concurrency-ok:",
+    "  s.t = time.NewTicker(time.Second)",
+    "  return s",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const hits = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "reasonless-suppression");
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].advisory, true);
+  });
+});
+
+test("lint: suppression-rot flags a dangling // concurrency-ok that suppresses nothing", () => {
+  const src = [
+    "package p",
+    "func f() {",
+    "  // concurrency-ok: guards nothing now",
+    "  doSomethingSafe()",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const hits = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "stale-suppression");
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].advisory, true);
+  });
+});
+
+test("lint: suppression-rot silent on a pragma that actually suppresses a hit", () => {
+  const src = [
+    "package p",
+    "import \"time\"",
+    "type S struct{ t *time.Ticker }",
+    "func New() *S {",
+    "  s := &S{}",
+    "  // concurrency-ok: stopped in Close()",
+    "  s.t = time.NewTicker(time.Second)",
+    "  return s",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const rot = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "reasonless-suppression" || d.ruleId === "stale-suppression");
+    assert.equal(rot.length, 0, "the pragma suppresses the timer-without-stop hit → not stale");
+  });
+});

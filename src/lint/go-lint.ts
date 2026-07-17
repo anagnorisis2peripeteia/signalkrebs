@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ConcurrencyDefect } from "../types.js";
@@ -554,6 +555,32 @@ const RULES = [
  * a hit is emitted only when its line falls inside a touched range. Suppressed
  * hits are retained (source of record) but marked so they do not drive the verdict.
  */
+// git blame author-time per 1-indexed line, for the suppression-rot audit. Best-effort — null
+// when the target is not a git repo or git is unavailable (the audit then skips the blame check).
+function blameLineTimes(repoDir: string, file: string): Record<number, number> | null {
+  try {
+    const out = execFileSync("git", ["-C", repoDir, "blame", "--line-porcelain", "--", file], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const times: Record<number, number> = {};
+    let line = 0;
+    for (const l of out.split("\n")) {
+      const header = l.match(/^[0-9a-f]{7,40}\s+\d+\s+(\d+)/);
+      if (header) {
+        line = Number(header[1]);
+        continue;
+      }
+      const at = l.match(/^author-time (\d+)/);
+      if (at && line > 0) times[line] = Number(at[1]);
+    }
+    return times;
+  } catch {
+    return null;
+  }
+}
+
 export function lintGo(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[] {
   const defects: ConcurrencyDefect[] = [];
   const byFile = new Map<string, Array<[number, number] | null>>();
@@ -581,8 +608,10 @@ export function lintGo(repoDir: string, touchedRanges: string[]): ConcurrencyDef
       ranges.some((r) => r !== null && line >= r[0] && line <= r[1]);
 
     const rulesForFile = file.endsWith("_test.go") ? TEST_RULES : RULES;
+    const firedLines = new Set<number>();
     for (const rule of rulesForFile) {
       for (const hit of rule(lines)) {
+        firedLines.add(hit.line);
         if (!inScope(hit.line)) continue;
         const suppression = suppressions.get(hit.line);
         defects.push({
@@ -599,6 +628,40 @@ export function lintGo(repoDir: string, touchedRanges: string[]): ConcurrencyDef
         });
       }
     }
+
+    // #13 suppression-rot audit (advisory): a `// concurrency-ok:` pragma is stale when it (a) has
+    // no reason, (b) guards a line that changed AFTER the pragma was added (git blame), or (c)
+    // suppresses no hit at all (dangling). A pragma covers its own line and the line below.
+    const blameTimes = blameLineTimes(repoDir, file);
+    lines.forEach((text, idx) => {
+      const m = text.match(/\/\/\s*concurrency-ok:(.*)$/);
+      if (m === null) return;
+      const L = idx + 1;
+      if (!inScope(L)) return;
+      const emit = (ruleId: string, summary: string) =>
+        defects.push({
+          kind: "toctou",
+          source: "static",
+          file,
+          line: L,
+          summary,
+          evidence: `[${ruleId}] ${file}:${L}\n    ${text.trim()}`,
+          ruleId,
+          suppressed: false,
+          advisory: true,
+        });
+      if (m[1].trim() === "") {
+        emit("reasonless-suppression", "`// concurrency-ok:` has no reason — every suppression must justify itself; add the reason or remove the pragma");
+        return;
+      }
+      if (!firedLines.has(L) && !firedLines.has(L + 1)) {
+        emit("stale-suppression", "`// concurrency-ok:` suppresses nothing — no rule fires on the guarded line, so the pragma is dead (the guarded code changed or moved); remove it");
+        return;
+      }
+      if (blameTimes && blameTimes[L] !== undefined && blameTimes[L + 1] !== undefined && blameTimes[L + 1] > blameTimes[L]) {
+        emit("stale-suppression-blame", "the line guarded by this `// concurrency-ok:` changed AFTER the pragma was added — the reason may no longer describe the current code; re-verify the suppression");
+      }
+    });
   }
   return defects;
 }
