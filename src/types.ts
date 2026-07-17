@@ -7,9 +7,9 @@
 // was actually EXERCISED under parallelism, and nothing surfaced within the
 // stress budget. Every degenerate state is an explicit non-passing verdict.
 
-export type DetectorTool = "go-race" | "swift-tsan" | "ts-async" | "dotnet-conc";
+export type DetectorTool = "go-race" | "swift-tsan" | "ts-async" | "dotnet-conc" | "py-async" | "rust-loom";
 
-export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan", "ts-async", "dotnet-conc"];
+export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan", "ts-async", "dotnet-conc", "py-async", "rust-loom"];
 
 /** Terminal verdicts, most-benign first. Only `clean` exits 0. */
 export type Verdict =

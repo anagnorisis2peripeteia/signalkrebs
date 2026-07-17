@@ -44,6 +44,8 @@ yet exits 0. signalkrebs closes that gap:
 | `go-race` | `go test -race` (ThreadSanitizer) + goroutine/timer lint | **validated** (`npm run validate:detector go-race`) |
 | `swift-tsan` | Xcode Thread Sanitizer + Swift 6 concurrency | **validated** (`npm run validate:detector swift-tsan`) |
 | `dotnet-conc` | Roslyn semantic analyzer — sync-over-async (deadlock), `async void`, fire-and-forget `Task` | **validated** (`npm run validate:detector dotnet-conc`) |
+| `py-async` | faulthandler deadlock/leak stress over the touched pytest/unittest suite | **validated** (`npm run validate:detector py-async`) |
+| `rust-loom` | Loom exhaustive interleaving model-checker (`--cfg loom cargo test`) | **validated** (`npm run validate:detector rust-loom`) |
 
 A lane stays in `runner.ts` `QUARANTINED_TOOLS` until its **planted-defect fixture** proves the
 detector actually catches a race on the host. This is the load-bearing discipline: a detector

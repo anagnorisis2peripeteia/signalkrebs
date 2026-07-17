@@ -59,6 +59,22 @@ const SPECS = {
     cleanChanged: ["Fixture.cs"],
     config: { timeoutMs: 120000 },
   },
+  "py-async": {
+    toolchain: "python3",
+    racyFixture: "fixtures/py-async",
+    racyChanged: ["test_probe.py"],
+    cleanFixture: "fixtures/py-clean",
+    cleanChanged: ["test_probe.py"],
+    config: { timeoutMs: 30000 },
+  },
+  "rust-loom": {
+    toolchain: "cargo",
+    racyFixture: "fixtures/rust-loom",
+    racyChanged: ["src/lib.rs"],
+    cleanFixture: "fixtures/rust-clean",
+    cleanChanged: ["src/lib.rs"],
+    config: { timeoutMs: 300000 },
+  },
 };
 
 function haveBinary(bin) {
