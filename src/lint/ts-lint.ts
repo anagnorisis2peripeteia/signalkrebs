@@ -130,7 +130,47 @@ function ruleGlobalListenerNeverRemoved(lines: string[]): RawHit[] {
   return hits;
 }
 
-const CUSTOM_RULES = [ruleIntervalNeverCleared, ruleGlobalListenerNeverRemoved];
+/** R3: unsafe-cutover (port of go-lint's destructive-before-confirm; crabbox #1103 class).
+ * A destructive teardown (`x.stop()/close()/cancel()/destroy()/…`) that runs BEFORE an
+ * `await`ed acquisition of its replacement, with no re-create in between — if the acquire
+ * rejects, the torn-down resource is gone and unrestored. Acquire/confirm the replacement
+ * before destroying the incumbent. Abstains on a restart between the teardown and the
+ * acquisition or in the failure path just after it. */
+function ruleUnsafeCutover(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  const DESTRUCTIVE_RE = /\.(?:stop|close|cancel|destroy|teardown|dispose|shutdown|abort|kill|unregister|revoke)\w*\s*\(/i;
+  const ACQUIRE_RE = /\b(?:const|let|var)\s+\w+\s*=\s*await\b/; // const x = await acquire()
+  const RESTART_RE = /\b(?:start|restart|reopen|reconnect|recreate|restore|revive|renew|reprovision|reacquire)\w*\s*\(/i;
+  const WINDOW = 15;
+  lines.forEach((text, i) => {
+    if (!DESTRUCTIVE_RE.test(text)) return;
+    if (isInStringLiteral(text, text.search(DESTRUCTIVE_RE))) return; // codegen inside a string, not a call
+    const windowEnd = Math.min(lines.length - 1, i + WINDOW);
+    let acquireLine = -1;
+    for (let j = i + 1; j <= windowEnd; j++) {
+      if (RESTART_RE.test(lines[j])) return; // re-created between teardown and acquire → safe
+      if (ACQUIRE_RE.test(lines[j])) {
+        acquireLine = j;
+        break;
+      }
+    }
+    if (acquireLine === -1) return;
+    const recoverEnd = Math.min(lines.length - 1, acquireLine + 5);
+    for (let j = acquireLine + 1; j <= recoverEnd; j++) {
+      if (RESTART_RE.test(lines[j])) return; // failure path restores → safe
+    }
+    hits.push({
+      line: i + 1,
+      ruleId: "destructive-before-confirm",
+      kind: "unsafe-cutover",
+      summary: `destructive teardown runs before the awaited acquisition on line ${acquireLine + 1}; if it rejects, the torn-down resource is gone and unrestored — acquire/confirm the replacement before destroying the incumbent`,
+      evidenceLine: text.trim(),
+    });
+  });
+  return hits;
+}
+
+const CUSTOM_RULES = [ruleIntervalNeverCleared, ruleGlobalListenerNeverRemoved, ruleUnsafeCutover];
 
 /**
  * ESLint pass over the touched files, using signalkrebs' own bundled eslint +

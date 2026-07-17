@@ -565,3 +565,63 @@ test("ts lint: type-aware no-floating-promises is caught end-to-end", () => {
     assert.equal(hits[0].line, 2);
   });
 });
+
+// --- unsafe-cutover ports (#3): Swift try + TS await ---
+
+test("swift lint: unsafe-cutover fires on teardown before a fallible try-acquire", () => {
+  const src = [
+    "func cutover() throws {",
+    "  self.timer.invalidate()",
+    "  let fresh = try makeConnection()",
+    "  self.conn = fresh",
+    "}",
+  ].join("\n");
+  withRepo({ "c.swift": src }, (dir) => {
+    const hits = lintSwift(dir, ["c.swift"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].kind, "unsafe-cutover");
+  });
+});
+
+test("swift lint: unsafe-cutover abstains when the thing is re-created between teardown and acquire", () => {
+  const src = [
+    "func cutover() throws {",
+    "  self.old.stop()",
+    "  self.old = restartOld()",
+    "  let fresh = try makeThing()",
+    "}",
+  ].join("\n");
+  withRepo({ "c.swift": src }, (dir) => {
+    const hits = lintSwift(dir, ["c.swift"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 0);
+  });
+});
+
+test("ts lint: unsafe-cutover fires on teardown before an awaited acquire", () => {
+  const src = [
+    "async function cutover() {",
+    "  this.socket.close()",
+    "  const fresh = await dialUpstream()",
+    "  this.socket = fresh",
+    "}",
+  ].join("\n");
+  withRepo({ "c.ts": src }, (dir) => {
+    const hits = lintTs(dir, ["c.ts"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].kind, "unsafe-cutover");
+  });
+});
+
+test("ts lint: unsafe-cutover abstains when the failure path restores", () => {
+  const src = [
+    "async function cutover() {",
+    "  this.session.destroy()",
+    "  const fresh = await acquire()",
+    "  if (!fresh) { await reconnect() }",
+    "}",
+  ].join("\n");
+  withRepo({ "c.ts": src }, (dir) => {
+    const hits = lintTs(dir, ["c.ts"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 0);
+  });
+});
