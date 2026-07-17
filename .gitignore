@@ -10,3 +10,8 @@ dist/
 DerivedData/
 fixtures/**/.build/
 target/
+fixtures/**/obj/
+fixtures/**/bin/
+fixtures/**/target/
+fixtures/**/.build/
+fixtures/**/Cargo.lock
