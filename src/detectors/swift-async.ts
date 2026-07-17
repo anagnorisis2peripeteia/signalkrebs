@@ -14,6 +14,7 @@ import {
   DEFAULT_TIMEOUT_MS,
 } from "../types.js";
 import { parseScopeEntry } from "../git-changed-files.js";
+import { applyAnalyzerMaturity } from "../lint/lint-common.js";
 import { packageHasTests, runSwift, swiftPackageOf } from "./swift-tsan.js";
 
 // The Swift structured-concurrency lane (swift-async). ThreadSanitizer (the swift-tsan lane) only
@@ -209,7 +210,7 @@ export const swiftAsyncAdapter: DetectorAdapter = {
       const inScope = ranges.includes(null) || ranges.some((r) => r !== null && f.Line >= r[0] && f.Line <= r[1]);
       if (inScope) out.push(toDefect(f, repoDir));
     }
-    return out;
+    return applyAnalyzerMaturity(repoDir, out);
   },
 
   runLiveness(config: DetectorConfig): LivenessEvidence {

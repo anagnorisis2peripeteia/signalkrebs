@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ConcurrencyDefect } from "../types.js";
 import { parseScopeEntry } from "../git-changed-files.js";
 import { type ReassignCutoverConfig, detectReassignCutover } from "./cutover-core.js";
+import { downgradeTestFileDefect } from "./lint-common.js";
 
 // Static anti-pattern rules for Swift. Like the Go set, these HARD-FAIL on a
 // touched line, so each is high-precision. Swift 6's actor/Sendable checking
@@ -159,5 +160,6 @@ export function lintSwift(repoDir: string, touchedRanges: string[]): Concurrency
       }
     }
   }
-  return defects;
+  // Maturity floor (#16): a hard hit in a test file is advisory (tests intentionally do these).
+  return defects.map(downgradeTestFileDefect);
 }

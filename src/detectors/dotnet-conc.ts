@@ -12,6 +12,7 @@ import type {
   LivenessEvidence,
 } from "../types.js";
 import { parseScopeEntry } from "../git-changed-files.js";
+import { applyAnalyzerMaturity } from "../lint/lint-common.js";
 
 // The C#/.NET concurrency lane. The Roslyn analyzer in runtime/csharp-conc IS the detector
 // (C# has no runtime race-runner analogous to `go test -race`/TSan; concurrency defects here are
@@ -260,7 +261,7 @@ export const dotnetConcAdapter: DetectorAdapter = {
         if (inScope) out.push(toDefect(f, repoDir));
       }
     }
-    return out;
+    return applyAnalyzerMaturity(repoDir, out);
   },
 
   runLiveness(config: DetectorConfig): LivenessEvidence {

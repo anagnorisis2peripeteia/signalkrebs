@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SLASH_SUPPRESS_RE, applyPragmaSuppression, downgradeTestFileDefect } from "../lint/lint-common.js";
 import type {
   ConcurrencyDefect,
   DetectorAdapter,
@@ -121,7 +122,9 @@ function lintFile(repoDir: string, file: string, ranges: Array<[number, number] 
       }
     }
   }
-  return out;
+  // Maturity floor (#16): `// concurrency-ok:` suppression + downgrade hits in test files to advisory.
+  applyPragmaSuppression(out, lines, SLASH_SUPPRESS_RE);
+  return out.map(downgradeTestFileDefect);
 }
 
 export const rustLoomAdapter: DetectorAdapter = {

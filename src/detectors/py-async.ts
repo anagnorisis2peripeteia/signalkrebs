@@ -12,6 +12,7 @@ import type {
   LivenessEvidence,
 } from "../types.js";
 import { parseScopeEntry } from "../git-changed-files.js";
+import { HASH_SUPPRESS_RE, applyPragmaSuppression, downgradeTestFileDefect } from "../lint/lint-common.js";
 
 // The Python asyncio/threading lane. No TSan equivalent, so the DYNAMIC detector runs the touched
 // package's tests under runtime/py-probe.py — a faulthandler dump-on-timeout that turns a deadlock/
@@ -126,8 +127,18 @@ function lintFile(repoDir: string, file: string, ranges: Array<[number, number] 
       out.push(defect("goroutine-leak", "py-fire-and-forget-task", file, i + 1,
         "a bare asyncio.create_task(...) is discarded — the task can be garbage-collected mid-flight and its exceptions are swallowed; keep a reference and await it", text.trim()));
     }
+    // R3: a common coroutine invoked as a BARE statement (line starts with the call, so it is not
+    // awaited, assigned, returned, or wrapped in create_task) — the coroutine object is created and
+    // immediately discarded, so it never runs (RuntimeWarning: coroutine was never awaited).
+    if (/^\s*asyncio\.(?:sleep|gather|wait|wait_for|shield)\s*\(/.test(text) && inScope(i + 1)) {
+      out.push(defect("channel-misuse", "py-unawaited-coroutine", file, i + 1,
+        "this coroutine is created as a bare statement and never awaited — it does not run; prefix with 'await' (or wrap in asyncio.create_task and keep the handle)", text.trim()));
+    }
   }
-  return out;
+  // Maturity floor (#16): `# concurrency-ok:` suppression + downgrade hits in test files to advisory
+  // (tests deliberately block/fire-and-forget — e.g. shellbench's create_task in a mock).
+  applyPragmaSuppression(out, lines, HASH_SUPPRESS_RE);
+  return out.map(downgradeTestFileDefect);
 }
 
 function defect(kind: string, ruleId: string, file: string, line: number, summary: string, evidenceLine: string): ConcurrencyDefect {

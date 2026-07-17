@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,9 @@ const { parseScopeEntry } = await import(pathToFileURL(join(ROOT, "dist/git-chan
 const { parseHangOutput } = await import(pathToFileURL(join(ROOT, "dist/detectors/dotnet-conc.js")).href);
 const { shuffleSeed, testFailed } = await import(pathToFileURL(join(ROOT, "dist/detectors/interleaving-stress.js")).href);
 const { parseHungTest } = await import(pathToFileURL(join(ROOT, "dist/detectors/swift-async.js")).href);
+const { verifyLaneMaturity } = await import(pathToFileURL(join(ROOT, "dist/lane-maturity.js")).href);
+const { pyAsyncAdapter } = await import(pathToFileURL(join(ROOT, "dist/detectors/py-async.js")).href);
+const { rustLoomAdapter } = await import(pathToFileURL(join(ROOT, "dist/detectors/rust-loom.js")).href);
 
 function exercise(over) {
   return {
@@ -90,7 +93,11 @@ test("parseScopeEntry: file:range and whole-file", () => {
 function withRepo(files, fn) {
   const dir = mkdtempSync(join(tmpdir(), "sk-lint-"));
   try {
-    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+    for (const [name, body] of Object.entries(files)) {
+      const full = join(dir, name);
+      mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, body);
+    }
     return fn(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -958,5 +965,60 @@ test("ts lint: unsafe-cutover abstains across scope boundaries (finally-close th
   withRepo({ "c.ts": src }, (dir) => {
     const hits = lintTs(dir, ["c.ts"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
     assert.equal(hits.length, 0, "close() in writer's finally + a reused `handle` in reader() is a different binding");
+  });
+});
+
+// ---- #16 item 2: lane-maturity gate ----
+test("maturity: every registered lane clears the mechanical floor (#16)", () => {
+  const violations = verifyLaneMaturity(ROOT);
+  assert.deepEqual(violations, [], `lanes below the maturity floor:\n${violations.join("\n")}`);
+});
+
+test("maturity: py-async honors `# concurrency-ok:` and downgrades test files (#16)", () => {
+  const racy = ["import asyncio, time", "async def f():", "    time.sleep(1)  # concurrency-ok: deliberate"].join("\n");
+  withRepo({ "svc.py": racy }, (dir) => {
+    const hits = pyAsyncAdapter.lint(dir, ["svc.py"]).filter((d) => !d.suppressed && !d.advisory);
+    assert.equal(hits.length, 0, "the pragma suppresses the blocking-sleep hit");
+  });
+  const plain = ["import asyncio, time", "async def f():", "    time.sleep(1)"].join("\n");
+  withRepo({ "test_svc.py": plain }, (dir) => {
+    const hard = pyAsyncAdapter.lint(dir, ["test_svc.py"]).filter((d) => !d.suppressed && !d.advisory);
+    const adv = pyAsyncAdapter.lint(dir, ["test_svc.py"]).filter((d) => d.advisory);
+    assert.equal(hard.length, 0, "a hit in a test file is not hard-fail");
+    assert.ok(adv.length >= 1, "it is downgraded to advisory");
+  });
+});
+
+test("maturity: rust-loom honors `// concurrency-ok:` and downgrades test files (#16)", () => {
+  const racy = [
+    "async fn f() {",
+    "    let g = m.lock().unwrap(); // concurrency-ok: released before real await",
+    "    something().await;",
+    "}",
+  ].join("\n");
+  withRepo({ "lib.rs": racy }, (dir) => {
+    const hits = rustLoomAdapter.lint(dir, ["lib.rs"]).filter((d) => !d.suppressed && !d.advisory);
+    assert.equal(hits.length, 0, "the pragma suppresses the lock-across-await hit");
+  });
+});
+
+test("maturity: swift-lint downgrades a hard cutover hit in a test file (#16)", () => {
+  const src = ["func cutover() throws {", "  self.conn.close()", "  let fresh = try makeConnection()", "  self.conn = fresh", "}"].join("\n");
+  withRepo({ "Tests/CutoverTests.swift": src }, (dir) => {
+    const hard = lintSwift(dir, ["Tests/CutoverTests.swift"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed && !d.advisory);
+    assert.equal(hard.length, 0, "a cutover hit in Tests/ is advisory, not hard-fail");
+  });
+});
+
+test("py-async: flags a bare unawaited coroutine, not an awaited/assigned one (#16 item 3)", () => {
+  const racy = ["import asyncio", "async def f():", "    asyncio.sleep(1)"].join("\n");
+  withRepo({ "r.py": racy }, (dir) => {
+    const hits = pyAsyncAdapter.lint(dir, ["r.py"]).filter((d) => d.ruleId === "py-unawaited-coroutine" && !d.suppressed);
+    assert.equal(hits.length, 1, "a bare asyncio.sleep(1) statement never runs");
+  });
+  const ok = ["import asyncio", "async def f():", "    await asyncio.sleep(1)", "    handle = asyncio.gather(a, b)"].join("\n");
+  withRepo({ "r.py": ok }, (dir) => {
+    const hits = pyAsyncAdapter.lint(dir, ["r.py"]).filter((d) => d.ruleId === "py-unawaited-coroutine" && !d.suppressed);
+    assert.equal(hits.length, 0, "awaited and assigned coroutines are fine");
   });
 });
