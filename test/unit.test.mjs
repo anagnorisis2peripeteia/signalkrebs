@@ -938,3 +938,25 @@ test("lint: unsafe-cutover abstains when the variable is reassigned between Clos
     assert.equal(hits.length, 0, "current is reassigned to next between Close and Open — a different object");
   });
 });
+
+test("ts lint: unsafe-cutover abstains across scope boundaries (finally-close then a later function reusing the name)", () => {
+  const src = [
+    "async function writer() {",
+    "  let handle;",
+    "  try {",
+    "    handle = await fs.open(p, 'w');",
+    "  } finally {",
+    "    await handle.close();",
+    "  }",
+    "}",
+    "async function reader() {",
+    "  let handle;",
+    "  handle = await fs.open(p, 'r');",
+    "  return handle;",
+    "}",
+  ].join("\n");
+  withRepo({ "c.ts": src }, (dir) => {
+    const hits = lintTs(dir, ["c.ts"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 0, "close() in writer's finally + a reused `handle` in reader() is a different binding");
+  });
+});

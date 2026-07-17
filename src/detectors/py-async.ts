@@ -85,6 +85,13 @@ function runProbe(pkgDir: string, timeoutMs: number): { deadlock: { file: string
 
 // Static lint: R1 `time.sleep(...)` inside an `async def` (blocks the event loop); R2 a bare
 // `asyncio.create_task(...)` statement (fire-and-forget → GC'd mid-flight, exceptions swallowed).
+/** A match is inside a Python string literal if an odd number of quotes precede it on the line —
+ * enough to reject `"time.sleep(30)\n"` written as a fixture script (shellbench), without a parser. */
+function inPyString(line: string, idx: number): boolean {
+  const before = line.slice(0, idx);
+  return (before.match(/"/g) || []).length % 2 === 1 || (before.match(/'/g) || []).length % 2 === 1;
+}
+
 function lintFile(repoDir: string, file: string, ranges: Array<[number, number] | null>): ConcurrencyDefect[] {
   let text: string;
   try {
@@ -110,7 +117,8 @@ function lintFile(repoDir: string, file: string, ranges: Array<[number, number] 
     // left the async def's body (a regular def or dedent below it) closes the scope
     if (asyncDefIndent >= 0 && indent <= asyncDefIndent && text.trim() !== "") asyncDefIndent = -1;
 
-    if (asyncDefIndent >= 0 && indent > asyncDefIndent && /\btime\.sleep\s*\(/.test(text) && inScope(i + 1)) {
+    const sleepMatch = text.match(/\btime\.sleep\s*\(/);
+    if (asyncDefIndent >= 0 && indent > asyncDefIndent && sleepMatch && !inPyString(text, sleepMatch.index ?? 0) && inScope(i + 1)) {
       out.push(defect("channel-misuse", "py-blocking-in-async", file, i + 1,
         "time.sleep() inside an 'async def' blocks the whole event loop — use 'await asyncio.sleep(...)'", text.trim()));
     }
