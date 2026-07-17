@@ -38,6 +38,8 @@ interface RawHit {
   kind: ConcurrencyDefect["kind"];
   summary: string;
   evidenceLine: string;
+  /** Advisory hits are surfaced for the hunt but do NOT hard-fail (e.g. test-quality nits). */
+  advisory?: boolean;
 }
 
 /** R1: a ticker/timer stored in a struct field that is never Stop()ed in this file. */
@@ -487,6 +489,39 @@ function ruleChannelMisuse(lines: string[]): RawHit[] {
   return hits;
 }
 
+/**
+ * R8 (test-only, ADVISORY): flaky timing-based concurrency test (crabbox §10b / #1098, #1102).
+ * A concurrency regression test that asserts via a multi-second `time.After` timeout paired with a
+ * `runtime.Stack` leak dump is a top CI-flake source — maintainers rewrite these to tight
+ * synchronous/barriered assertions (`select { case <-done: default: t.Fatal }`) because the
+ * production code already blocks until the goroutine exits. Surfaced for the hunt, NOT hard-fail
+ * (it's the contributor's own test).
+ */
+function ruleFlakyTimingTest(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  const joined = lines.join("\n");
+  if (!/\bruntime\.Stack\s*\(/.test(joined)) return hits; // only the leak-dump shape
+  const AFTER_SECONDS = /\btime\.After\s*\(\s*(?:\d+\s*\*\s*)?time\.Second\b|\btime\.After\s*\([^)]*\.Seconds?\b/;
+  lines.forEach((text, i) => {
+    if (!AFTER_SECONDS.test(text)) return;
+    const near = lines.slice(Math.max(0, i - 3), Math.min(lines.length, i + 8)).join("\n");
+    if (!/\bruntime\.Stack\s*\(/.test(near)) return; // the time.After + stack-dump must co-occur
+    hits.push({
+      line: i + 1,
+      ruleId: "flaky-timing-test",
+      kind: "toctou",
+      summary:
+        "multi-second time.After timeout + runtime.Stack leak-dump is a flaky test shape (a top CI-flake source) — the production code likely already synchronizes; prefer a synchronous/barriered assertion (e.g. `select { case <-done: default: t.Fatal }` or wait on the real completion signal)",
+      evidenceLine: text.trim(),
+      advisory: true,
+    });
+  });
+  return hits;
+}
+
+// Test files get only the advisory test-quality rules; production files get the hard-fail set.
+const TEST_RULES = [ruleFlakyTimingTest];
+
 const RULES = [
   ruleTimerWithoutStop,
   ruleRangeOverTickerNoExit,
@@ -508,7 +543,7 @@ export function lintGo(repoDir: string, touchedRanges: string[]): ConcurrencyDef
 
   for (const entry of touchedRanges) {
     const { file, start, end } = parseScopeEntry(entry);
-    if (!file.endsWith(".go") || file.endsWith("_test.go")) continue;
+    if (!file.endsWith(".go")) continue; // _test.go kept for the advisory test-quality rules
     const list = byFile.get(file) ?? [];
     list.push(start !== undefined && end !== undefined ? [start, end] : null); // null = whole file
     byFile.set(file, list);
@@ -528,7 +563,8 @@ export function lintGo(repoDir: string, touchedRanges: string[]): ConcurrencyDef
       wholeFile ||
       ranges.some((r) => r !== null && line >= r[0] && line <= r[1]);
 
-    for (const rule of RULES) {
+    const rulesForFile = file.endsWith("_test.go") ? TEST_RULES : RULES;
+    for (const rule of rulesForFile) {
       for (const hit of rule(lines)) {
         if (!inScope(hit.line)) continue;
         const suppression = suppressions.get(hit.line);
@@ -542,6 +578,7 @@ export function lintGo(repoDir: string, touchedRanges: string[]): ConcurrencyDef
           ruleId: hit.ruleId,
           suppressed: suppression !== undefined,
           suppressionReason: suppression?.reason,
+          advisory: hit.advisory || undefined,
         });
       }
     }

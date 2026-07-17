@@ -625,3 +625,44 @@ test("ts lint: unsafe-cutover abstains when the failure path restores", () => {
     assert.equal(hits.length, 0);
   });
 });
+
+// --- flaky-timing-test advisory lint (#5) ---
+
+test("lint: flaky-timing-test flags the multi-second time.After + runtime.Stack shape (advisory)", () => {
+  const src = [
+    "package p",
+    "import (\"testing\"; \"time\"; \"runtime\")",
+    "func TestLeak(t *testing.T) {",
+    "  done := make(chan struct{})",
+    "  go func() { work(); close(done) }()",
+    "  select {",
+    "  case <-done:",
+    "  case <-time.After(3 * time.Second):",
+    "    buf := make([]byte, 1<<16)",
+    "    runtime.Stack(buf, true)",
+    "    t.Fatalf(\"leak: %s\", buf)",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "x_test.go": src }, (dir) => {
+    const hits = lintGo(dir, ["x_test.go"]).filter((d) => d.ruleId === "flaky-timing-test");
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].advisory, true);
+  });
+});
+
+test("lint: flaky-timing-test is silent on a synchronous test (no runtime.Stack)", () => {
+  const src = [
+    "package p",
+    "import \"testing\"",
+    "func TestSync(t *testing.T) {",
+    "  done := make(chan struct{})",
+    "  go func() { work(); close(done) }()",
+    "  select { case <-done: default: t.Fatal(\"leak\") }",
+    "}",
+  ].join("\n");
+  withRepo({ "x_test.go": src }, (dir) => {
+    const hits = lintGo(dir, ["x_test.go"]).filter((d) => d.ruleId === "flaky-timing-test");
+    assert.equal(hits.length, 0);
+  });
+});
