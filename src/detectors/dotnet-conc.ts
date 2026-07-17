@@ -102,6 +102,9 @@ function toDefect(f: RawFinding, repoDir: string): ConcurrencyDefect {
     evidence: `[${f.Rule}] ${file}:${f.Line}`,
     ruleId: f.Rule,
     suppressed: false,
+    // CC004 (field-across-await) is a heuristic that over-fires on lock/SemaphoreSlim-serialized
+    // sections — advisory, like ts-async's require-atomic-updates: surfaced but not hard-failing.
+    advisory: f.Rule.startsWith("CC004") || undefined,
   };
 }
 

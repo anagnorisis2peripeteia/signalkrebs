@@ -107,6 +107,43 @@ foreach (var project in projects)
             Add(findings, "CC003-fire-and-forget", "goroutine-leak", tree, inv.GetLocation(),
                 "a Task-returning call is discarded as a statement (never awaited or assigned) — its exceptions are swallowed and completion is never observed; await it or assign to '_ =' deliberately");
         }
+
+        // CC004 field-mutated-across-await — a field read into a local BEFORE an await, then the
+        // same field written AFTER it: another task can change the field during the await, so the
+        // write clobbers a concurrent update (C#'s require-atomic-updates / check-then-act). Advisory
+        // (over-fires on lock/SemaphoreSlim-serialized sections) — the adapter marks it non-hard-fail.
+        foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+        {
+            SyntaxNode? body = (SyntaxNode?)method.Body ?? method.ExpressionBody;
+            if (body is null) continue;
+            var awaits = body.DescendantNodes().OfType<AwaitExpressionSyntax>().Select(a => a.SpanStart).ToList();
+            if (awaits.Count == 0) continue;
+            var firstAwait = awaits.Min();
+
+            var readBefore = new HashSet<string>();
+            foreach (var node in body.DescendantNodes())
+            {
+                if (node.SpanStart >= firstAwait) continue;
+                ExpressionSyntax? rhs = node switch
+                {
+                    EqualsValueClauseSyntax ev => ev.Value,          // var v = this.x
+                    AssignmentExpressionSyntax a => a.Right,          // v = this.x
+                    _ => null,
+                };
+                var fn = FieldNameOf(rhs, model);
+                if (fn is not null) readBefore.Add(fn);
+            }
+            if (readBefore.Count == 0) continue;
+
+            foreach (var asg in body.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+            {
+                if (asg.SpanStart <= firstAwait) continue;
+                var fn = FieldNameOf(asg.Left, model);
+                if (fn is not null && readBefore.Contains(fn))
+                    Add(findings, "CC004-field-across-await", "toctou", tree, asg.GetLocation(),
+                        $"field '{fn}' is read before an await and written after it — a check-then-act across the await; another task can change '{fn}' during the await and this write clobbers it (guard the section or make the update atomic)");
+            }
+        }
     }
 }
 
@@ -126,7 +163,8 @@ else
     Console.WriteLine($"[conc] {ordered.Count} finding(s): "
         + $"{ordered.Count(f => f.Rule.StartsWith("CC001"))} sync-over-async, "
         + $"{ordered.Count(f => f.Rule.StartsWith("CC002"))} async-void, "
-        + $"{ordered.Count(f => f.Rule.StartsWith("CC003"))} fire-and-forget.");
+        + $"{ordered.Count(f => f.Rule.StartsWith("CC003"))} fire-and-forget, "
+        + $"{ordered.Count(f => f.Rule.StartsWith("CC004"))} field-across-await.");
 }
 
 return ordered.Count == 0 ? 0 : 1;
@@ -165,6 +203,16 @@ static bool IsEventHandler(MethodDeclarationSyntax m, SemanticModel model, IName
     for (var t = second; t is not null; t = t.BaseType)
         if (SymbolEqualityComparer.Default.Equals(t, eventArgs)) return true;
     return false;
+}
+
+// The mutable instance field a read/write expression resolves to (this.x / bare field / _x), else
+// null. Used by CC004 to correlate a pre-await read with a post-await write of the same field.
+static string? FieldNameOf(Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionSyntax? expr, SemanticModel model)
+{
+    if (expr is null) return null;
+    if (model.GetSymbolInfo(expr).Symbol is IFieldSymbol { IsConst: false, IsStatic: false } f)
+        return f.Name;
+    return null;
 }
 
 static string Short(string path)
