@@ -31,6 +31,8 @@ interface RawHit {
   kind: ConcurrencyDefect["kind"];
   summary: string;
   evidenceLine: string;
+  /** Heuristic hits too false-positive-prone to hard-fail are surfaced but non-blocking. */
+  advisory?: boolean;
 }
 
 // A timer bound to a stored PROPERTY (`self.x = …` or `x.y = …`) leaks for the
@@ -115,7 +117,49 @@ function ruleUnsafeCutover(lines: string[]): RawHit[] {
   return detectReassignCutover(lines, SWIFT_CUTOVER_CFG).map((h) => ({ ...h, kind: h.kind as RawHit["kind"] }));
 }
 
-const RULES = [ruleTimerNeverInvalidated, ruleDispatchSourceNeverCancelled, ruleUnsafeCutover];
+/** R4: subprocess/pipe descriptors not close-on-exec atomically (CodexBar #2124). A `posix_spawn*`
+ * whose spawn flags/attributes omit POSIX_SPAWN_CLOEXEC_DEFAULT lets a CONCURRENTLY-spawned child
+ * inherit this process's open descriptors (e.g. a probe pipe's read end) and hold them open — so the
+ * parent's stream-closure signal never arrives even after the TARGET child exits, hanging the runner
+ * (#2124's root class: closure and exit are two signals, and a leaked fd starves the closure one).
+ * Set close-on-exec atomically in the spawn attributes / pipe creation. Suppress with `// concurrency-ok:`.
+ * High-precision: the hard variant fires only on a posix_spawn flag set that omits CLOEXEC_DEFAULT
+ * anywhere in the file; the noisier raw-`pipe(` variant is advisory. */
+function ruleSpawnPipeWithoutCloexec(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  const joined = lines.join("\n");
+  const hasCloexecDefault = /\bPOSIX_SPAWN_CLOEXEC_DEFAULT\b/.test(joined);
+  // Other posix_spawn attribute flags that indicate a real spawn-attr set is being built.
+  const SPAWN_FLAG_RE = /\bPOSIX_SPAWN_(?:SETSID|SETPGROUP|SETSIGDEF|SETSIGMASK|SETEXEC|START_SUSPENDED)\b/;
+  const RAW_PIPE_RE = /(?:^|[^.\w])pipe\s*\(/; // C pipe(&fds), not Foundation Pipe() or a .pipe() method
+  lines.forEach((text, i) => {
+    if (/^\s*(?:\/\/|\*)/.test(text)) return; // comment line
+    const flag = text.match(SPAWN_FLAG_RE);
+    if (flag && !hasCloexecDefault) {
+      hits.push({
+        line: i + 1,
+        ruleId: "spawn-without-cloexec",
+        kind: "anti-pattern",
+        summary: `posix_spawn attributes set '${flag[0]}' but never POSIX_SPAWN_CLOEXEC_DEFAULT — a concurrently-spawned child inherits this process's open fds (e.g. a pipe read end) and holds them open, so a stream-closure signal never arrives even after the target child exits (CodexBar #2124). Add POSIX_SPAWN_CLOEXEC_DEFAULT to the spawn attributes.`,
+        evidenceLine: text.trim(),
+      });
+      return;
+    }
+    if (RAW_PIPE_RE.test(text) && !/\bO_CLOEXEC\b|\bFD_CLOEXEC\b|\bpipe2\b/.test(joined)) {
+      hits.push({
+        line: i + 1,
+        ruleId: "pipe-without-cloexec",
+        kind: "anti-pattern",
+        summary: `pipe() created with no atomic O_CLOEXEC in the file — a concurrently-spawned child can inherit the descriptors and hold the pipe open past the intended child's exit (CodexBar #2124). Prefer pipe2(…, O_CLOEXEC) or set close-on-exec atomically.`,
+        evidenceLine: text.trim(),
+        advisory: true,
+      });
+    }
+  });
+  return hits;
+}
+
+const RULES = [ruleTimerNeverInvalidated, ruleDispatchSourceNeverCancelled, ruleUnsafeCutover, ruleSpawnPipeWithoutCloexec];
 
 export function lintSwift(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[] {
   const defects: ConcurrencyDefect[] = [];
@@ -156,6 +200,7 @@ export function lintSwift(repoDir: string, touchedRanges: string[]): Concurrency
           ruleId: hit.ruleId,
           suppressed: reason !== undefined,
           suppressionReason: reason,
+          advisory: hit.advisory || undefined,
         });
       }
     }
