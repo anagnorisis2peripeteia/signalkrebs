@@ -287,6 +287,41 @@ test("lint: shadowed-retry-state abstains when the counter is hoisted above the 
   });
 });
 
+// --- channel-misuse: unconditional double close (#8) ---
+
+test("lint: channel-misuse fires on an unconditional double close(ch)", () => {
+  const src = [
+    "package p",
+    "func run(done chan int) {",
+    "  close(done)",
+    "  work()",
+    "  close(done)",
+    "}",
+  ].join("\n");
+  withRepo({ "c.go": src }, (dir) => {
+    const hits = lintGo(dir, ["c.go"]).filter((d) => d.ruleId === "channel-misuse" && !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.match(hits[0].summary, /done/);
+  });
+});
+
+test("lint: channel-misuse abstains on branch-guarded closes (possibly exclusive)", () => {
+  const src = [
+    "package p",
+    "func run(done chan int, ok bool) {",
+    "  if ok {",
+    "    close(done)",
+    "  } else {",
+    "    close(done)",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "c.go": src }, (dir) => {
+    const hits = lintGo(dir, ["c.go"]).filter((d) => d.ruleId === "channel-misuse" && !d.suppressed);
+    assert.equal(hits.length, 0);
+  });
+});
+
 test("lint: destructive-before-confirm does NOT fire on the safe order (acquire first, destroy after)", () => {
   // steipete's actual fix: create the ticket first, only stop the old daemon
   // once the replacement is confirmed obtainable.

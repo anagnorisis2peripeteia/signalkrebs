@@ -437,6 +437,56 @@ function ruleShadowedRetryState(lines: string[]): RawHit[] {
   return hits;
 }
 
+/**
+ * R7: channel-misuse — an UNCONDITIONAL double `close(ch)` of the same channel in one
+ * function. Both closes sit at function-body depth, so both run on every path and the
+ * second panics. Branch-guarded closes (possibly mutually exclusive) and send-on-closed
+ * races are control-flow-dependent → left to the hunt, not this hard-fail lint. Close a
+ * channel exactly once (single owner, or `sync.Once`).
+ */
+function ruleChannelMisuse(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  const CLOSE_RE = /\bclose\s*\(\s*([\w.]+)\s*\)/;
+  const FUNC_DECL_RE = /^\s*func\b/;
+
+  let depth = 0;
+  let funcDepth = -1;
+  let bodyCloses = new Map<string, number[]>();
+  lines.forEach((text, i) => {
+    if (funcDepth === -1 && FUNC_DECL_RE.test(text)) {
+      funcDepth = depth;
+      bodyCloses = new Map();
+    }
+    // A close at exactly func-body depth (funcDepth + 1) is unconditional. Checked
+    // against `depth` BEFORE applying this line's own braces.
+    if (funcDepth !== -1 && depth === funcDepth + 1) {
+      const m = text.match(CLOSE_RE);
+      if (m) {
+        const ch = m[1];
+        const arr = bodyCloses.get(ch) ?? [];
+        arr.push(i);
+        bodyCloses.set(ch, arr);
+      }
+    }
+    depth += (text.match(/\{/g) || []).length - (text.match(/\}/g) || []).length;
+    if (funcDepth !== -1 && depth <= funcDepth) {
+      for (const [ch, ls] of bodyCloses) {
+        if (ls.length >= 2) {
+          hits.push({
+            line: ls[1] + 1,
+            ruleId: "channel-misuse",
+            kind: "channel-misuse",
+            summary: `channel '${ch}' is unconditionally closed more than once (lines ${ls.map((l) => l + 1).join(", ")}) — the second close panics; close exactly once (a single owner or sync.Once)`,
+            evidenceLine: lines[ls[1]].trim(),
+          });
+        }
+      }
+      funcDepth = -1;
+    }
+  });
+  return hits;
+}
+
 const RULES = [
   ruleTimerWithoutStop,
   ruleRangeOverTickerNoExit,
@@ -444,6 +494,7 @@ const RULES = [
   ruleDestructiveBeforeConfirm,
   ruleLeakOnErrorReturn,
   ruleShadowedRetryState,
+  ruleChannelMisuse,
 ];
 
 /**
