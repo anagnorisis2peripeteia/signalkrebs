@@ -151,11 +151,25 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
   // The call/receiver snippet, for the message — best-effort, falls back to the raw line.
   const DESTRUCTIVE_CALL_RE =
     /[\w.]*\b(?:stop|close|delete|remove|teardown|destroy|kill|unregister|revoke|release)\w*\([^()]*\)/i;
-  // `x, err := something.Create/New/Dial/...(...)` — a fallible two-value acquisition.
+  // `x, err := something.Create/Dial/...(...)` OR single-value `err := cmd.Start()` (#2 recall).
   const ACQUIRE_RE =
-    /\b\w+\s*,\s*err\b\s*:?=\s*[\w.]+\.(Create|New|Dial|Acquire|Open|Start|Register|Provision|Prepare|Connect|Mint|Reserve)\w*\s*\(/;
+    /\b(?:\w+\s*,\s*)?err\b\s*:?=\s*[\w.]+\.(Create|New|Dial|Acquire|Open|Start|Register|Provision|Prepare|Connect|Mint|Reserve)\w*\s*\(/;
   const ACQUIRE_CALL_RE =
-    /\w+\s*,\s*err\b\s*:?=\s*[\w.]+\.(?:Create|New|Dial|Acquire|Open|Start|Register|Provision|Prepare|Connect|Mint|Reserve)\w*\([^()]*\)/;
+    /(?:\w+\s*,\s*)?err\b\s*:?=\s*[\w.]+\.(?:Create|New|Dial|Acquire|Open|Start|Register|Provision|Prepare|Connect|Mint|Reserve)\w*\([^()]*\)/;
+  // #2 precision gate: the destroyed and acquired resources must be RELATED — share a non-trivial
+  // identifier (a lease/conn/daemon arg or receiver). Unrelated teardown+setup is not this bug.
+  const CUTOVER_STOP = new Set([
+    "stop", "close", "delete", "remove", "teardown", "destroy", "kill", "unregister", "revoke", "release",
+    "create", "new", "dial", "acquire", "open", "start", "register", "provision", "prepare", "connect", "mint", "reserve",
+    "err", "nil", "ctx", "context", "return", "var", "func", "defer", "the", "and", "for",
+  ]);
+  const identsOf = (s: string) =>
+    new Set((s.match(/\b[a-zA-Z_]\w{2,}\b/g) ?? []).map((w) => w.toLowerCase()).filter((w) => !CUTOVER_STOP.has(w)));
+  const sharesResource = (destroy: string, acquire: string) => {
+    const b = identsOf(acquire);
+    for (const x of identsOf(destroy)) if (b.has(x)) return true;
+    return false;
+  };
   // Any call that could plausibly restore/re-create the just-destroyed thing —
   // if one appears between the destructive call and the acquisition, abstain.
   const RESTART_RE = /\b(start|restart|reopen|reconnect|recreate|restore|revive|renew)\w*\s*\(/i;
@@ -240,6 +254,9 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
         if (k > errCheckLine && lines[k].trim() === "}") break; // end of the if-block
       }
       if (!hasReturn) continue;
+
+      // #2 precision: don't fire on an UNRELATED teardown+setup (they must share a resource ident).
+      if (!sharesResource(destructiveLine, lines[acquireLine])) continue;
 
       const destroyMatch = destructiveLine.match(DESTRUCTIVE_CALL_RE);
       const destroyCall = (destroyMatch ? destroyMatch[0] : destructiveLine).trim();

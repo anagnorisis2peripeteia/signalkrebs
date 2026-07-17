@@ -666,3 +666,42 @@ test("lint: flaky-timing-test is silent on a synchronous test (no runtime.Stack)
     assert.equal(hits.length, 0);
   });
 });
+
+// --- unsafe-cutover precision + single-value (#2) ---
+
+test("lint: unsafe-cutover abstains on UNRELATED teardown+setup (no shared resource)", () => {
+  const src = [
+    "package cli",
+    "func f(tmp *os.File, addr string) error {",
+    "  tmp.Close()",
+    "  c, err := net.Dial(\"tcp\", addr)",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  _ = c",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "u.go": src }, (dir) => {
+    const hits = lintGo(dir, ["u.go"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 0, "closing tmp is unrelated to dialing c");
+  });
+});
+
+test("lint: unsafe-cutover fires on a single-value acquisition sharing the resource (err := ...Start)", () => {
+  const src = [
+    "package cli",
+    "func (a *App) restartEgress(leaseID string) error {",
+    "  a.stopEgress(leaseID)",
+    "  err := a.ProvisionEgress(leaseID)",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const hits = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 1, "stopEgress then single-value startEgress, both on leaseID");
+  });
+});
