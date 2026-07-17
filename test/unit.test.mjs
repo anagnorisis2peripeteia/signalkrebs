@@ -159,6 +159,164 @@ test("lint: range-over-ticker with no exit fires", () => {
   });
 });
 
+// --- destructive-before-confirm cutover (crabbox #1103 bug class) ---
+
+test("lint: destructive-before-confirm fires on the #1103 shape (stop daemon, then fallible ticket create, then bail)", () => {
+  const src = [
+    "package cli",
+    "",
+    "func (a *App) egressStart(daemon *bool, leaseID string) error {",
+    "  if *daemon {",
+    "    a.stopEgressHostDaemonLocked(leaseID)",
+    "  }",
+    "  clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, \"client\")",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  _ = clientTicket",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "egress.go": src }, (dir) => {
+    const hits = lintGo(dir, ["egress.go"]).filter((d) => !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].ruleId, "destructive-before-confirm");
+    assert.equal(hits[0].line, 5, "fires at the destructive call's line — that's the fix point");
+    assert.match(hits[0].summary, /stopEgressHostDaemonLocked/);
+    assert.match(hits[0].summary, /CreateEgressTicket/);
+  });
+});
+
+// --- leak-on-error-return (crabbox #1099 bug class) ---
+
+test("lint: leak-on-error-return fires on the #1099 shape (bail before the defer-close is registered)", () => {
+  const src = [
+    "package cli",
+    "func fetch(pool *Pool) error {",
+    "  client, err := pool.Dial(ctx)",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  if err := client.Ping(); err != nil {",
+    "    return err",
+    "  }",
+    "  defer client.Close()",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "x.go": src }, (dir) => {
+    const hits = lintGo(dir, ["x.go"]).filter((d) => !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].ruleId, "leak-on-error-return");
+    assert.equal(hits[0].line, 3, "fires at the acquisition — the fix point");
+    assert.match(hits[0].summary, /client/);
+  });
+});
+
+test("lint: leak-on-error-return abstains when the defer precedes the fallible return", () => {
+  const src = [
+    "package cli",
+    "func fetch(pool *Pool) error {",
+    "  client, err := pool.Dial(ctx)",
+    "  if err != nil { return err }",
+    "  defer client.Close()",
+    "  if err := client.Ping(); err != nil {",
+    "    return err",
+    "  }",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "x.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["x.go"]).filter((d) => !d.suppressed).length, 0);
+  });
+});
+
+test("lint: leak-on-error-return abstains when only the acquisition's own err-check returns", () => {
+  const src = [
+    "package cli",
+    "func fetch(pool *Pool) error {",
+    "  client, err := pool.Dial(ctx)",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  defer client.Close()",
+    "  return doWork(client)",
+    "}",
+  ].join("\n");
+  withRepo({ "x.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["x.go"]).filter((d) => !d.suppressed).length, 0);
+  });
+});
+
+test("lint: destructive-before-confirm does NOT fire on the safe order (acquire first, destroy after)", () => {
+  // steipete's actual fix: create the ticket first, only stop the old daemon
+  // once the replacement is confirmed obtainable.
+  const src = [
+    "package cli",
+    "",
+    "func (a *App) egressStart(daemon *bool, leaseID string) error {",
+    "  clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, \"client\")",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  if *daemon {",
+    "    a.stopEgressHostDaemonLocked(leaseID)",
+    "  }",
+    "  _ = clientTicket",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "egress.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["egress.go"]).length, 0);
+  });
+});
+
+test("lint: destructive-before-confirm does NOT fire when the destroyed thing is re-created before the error path (precision)", () => {
+  const src = [
+    "package cli",
+    "",
+    "func (a *App) rotate(leaseID string) error {",
+    "  a.stopEgressHostDaemonLocked(leaseID)",
+    "  a.startEgressHostDaemonLocked(leaseID)",
+    "  ticket, err := coord.CreateEgressTicket(ctx, leaseID, \"client\")",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  _ = ticket",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "rotate.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["rotate.go"]).length, 0, "independent teardown+setup must not fire");
+  });
+});
+
+test("lint: // concurrency-ok suppresses a destructive-before-confirm hit", () => {
+  const src = [
+    "package cli",
+    "",
+    "func (a *App) egressStart(daemon *bool, leaseID string) error {",
+    "  if *daemon {",
+    "    // concurrency-ok: daemon restart is externally supervised, ticket retried",
+    "    a.stopEgressHostDaemonLocked(leaseID)",
+    "  }",
+    "  clientTicket, err := coord.CreateEgressTicket(ctx, leaseID, \"client\")",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  _ = clientTicket",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "egress.go": src }, (dir) => {
+    const hits = lintGo(dir, ["egress.go"]);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].ruleId, "destructive-before-confirm");
+    assert.equal(hits[0].suppressed, true);
+    assert.match(hits[0].suppressionReason, /externally supervised/);
+  });
+});
+
 // --- Swift lint (precision fix found by dogfooding on steipete/CodexBar) ---
 
 test("swift lint: a self-property timer never cancelled fires", () => {

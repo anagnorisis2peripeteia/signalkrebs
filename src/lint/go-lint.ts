@@ -125,7 +125,254 @@ function ruleWaitGroupAddInGoroutine(lines: string[]): RawHit[] {
   return hits;
 }
 
-const RULES = [ruleTimerWithoutStop, ruleRangeOverTickerNoExit, ruleWaitGroupAddInGoroutine];
+/**
+ * R4: destructive-before-confirm cutover. A function tears down a live resource
+ * (stop/close/delete/...) and only THEN attempts a fallible acquisition of its
+ * replacement (`x, err := coord.CreateEgressTicket(...)`-shaped), whose error
+ * path bails without restoring what was destroyed. A transient acquisition
+ * failure leaves the system worse off than before the function ran — see
+ * crabbox #1103 (`stopEgressHostDaemonLocked` before `CreateEgressTicket`; a
+ * ticket failure left egress dead). General rule: acquire/confirm the
+ * replacement before destroying the incumbent.
+ *
+ * Scoped per function (brace-depth boundaries) so the local windows below never
+ * bleed across unrelated functions. High-precision by construction: it only
+ * fires on the exact destructive -> fallible-two-value-acquire -> bail-on-error
+ * sequence, and abstains the moment a restart/re-acquire of the destroyed thing
+ * appears in between (an independent teardown+setup is not this bug).
+ */
+function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+
+  // A CALL (not a `func` definition) whose name reads as tearing something down.
+  const DESTRUCTIVE_RE = /\b(stop|close|delete|remove|teardown|destroy|kill|unregister|revoke|release)\w*\s*\(/i;
+  // The call/receiver snippet, for the message — best-effort, falls back to the raw line.
+  const DESTRUCTIVE_CALL_RE =
+    /[\w.]*\b(?:stop|close|delete|remove|teardown|destroy|kill|unregister|revoke|release)\w*\([^()]*\)/i;
+  // `x, err := something.Create/New/Dial/...(...)` — a fallible two-value acquisition.
+  const ACQUIRE_RE =
+    /\b\w+\s*,\s*err\b\s*:?=\s*[\w.]+\.(Create|New|Dial|Acquire|Open|Start|Register|Provision|Prepare|Connect|Mint|Reserve)\w*\s*\(/;
+  const ACQUIRE_CALL_RE =
+    /\w+\s*,\s*err\b\s*:?=\s*[\w.]+\.(?:Create|New|Dial|Acquire|Open|Start|Register|Provision|Prepare|Connect|Mint|Reserve)\w*\([^()]*\)/;
+  // Any call that could plausibly restore/re-create the just-destroyed thing —
+  // if one appears between the destructive call and the acquisition, abstain.
+  const RESTART_RE = /\b(start|restart|reopen|reconnect|recreate|restore|revive|renew)\w*\s*\(/i;
+  const ERR_CHECK_RE = /if\s+err\s*!=\s*nil\s*\{/;
+  const FUNC_DECL_RE = /^\s*func\b/;
+
+  const WINDOW = 20; // lines to look forward for the acquisition
+  const ERR_CHECK_WINDOW = 3; // lines to look forward for the `if err != nil {` itself
+  const ERR_BODY_WINDOW = 3; // lines inside that if-block to look for `return`
+
+  // Pass 1: function ranges by brace depth, matching the style of
+  // ruleWaitGroupAddInGoroutine's depth tracking above.
+  const ranges: Array<[number, number]> = [];
+  {
+    let depth = 0;
+    let funcStart = -1;
+    let funcDepth = -1;
+    lines.forEach((text, i) => {
+      if (funcDepth === -1 && FUNC_DECL_RE.test(text)) {
+        funcStart = i;
+        funcDepth = depth;
+      }
+      const opens = (text.match(/\{/g) || []).length;
+      const closes = (text.match(/\}/g) || []).length;
+      depth += opens - closes;
+      if (funcDepth !== -1 && depth <= funcDepth) {
+        ranges.push([funcStart, i]);
+        funcDepth = -1;
+        funcStart = -1;
+      }
+    });
+  }
+
+  // Pass 2: within each function, look for the destructive -> acquire -> bail sequence.
+  for (const [start, end] of ranges) {
+    for (let i = start; i <= end; i++) {
+      const destructiveLine = lines[i];
+      if (FUNC_DECL_RE.test(destructiveLine)) continue; // a `func stopFoo(...)` definition, not a call
+      if (!DESTRUCTIVE_RE.test(destructiveLine)) continue;
+
+      // Find the next fallible two-value acquisition within the window.
+      const windowEnd = Math.min(end, i + WINDOW);
+      let acquireLine = -1;
+      for (let j = i + 1; j <= windowEnd; j++) {
+        if (ACQUIRE_RE.test(lines[j])) {
+          acquireLine = j;
+          break;
+        }
+      }
+      if (acquireLine === -1) continue;
+
+      // Precision guard: if anything between the two looks like it re-acquires
+      // or restarts the destroyed thing, this is not the destructive-before-confirm
+      // shape — it's an independent (and already safe) teardown+setup.
+      let restartSeen = false;
+      for (let j = i + 1; j < acquireLine; j++) {
+        if (RESTART_RE.test(lines[j])) {
+          restartSeen = true;
+          break;
+        }
+      }
+      if (restartSeen) continue;
+
+      // The acquisition's error path must bail (return) within a few lines.
+      const errCheckEnd = Math.min(end, acquireLine + ERR_CHECK_WINDOW);
+      let errCheckLine = -1;
+      for (let k = acquireLine; k <= errCheckEnd; k++) {
+        if (ERR_CHECK_RE.test(lines[k])) {
+          errCheckLine = k;
+          break;
+        }
+      }
+      if (errCheckLine === -1) continue;
+
+      let hasReturn = false;
+      const bodyEnd = Math.min(end, errCheckLine + ERR_BODY_WINDOW);
+      for (let k = errCheckLine; k <= bodyEnd; k++) {
+        if (/\breturn\b/.test(lines[k])) {
+          hasReturn = true;
+          break;
+        }
+        if (k > errCheckLine && lines[k].trim() === "}") break; // end of the if-block
+      }
+      if (!hasReturn) continue;
+
+      const destroyMatch = destructiveLine.match(DESTRUCTIVE_CALL_RE);
+      const destroyCall = (destroyMatch ? destroyMatch[0] : destructiveLine).trim();
+      const acquireMatch = lines[acquireLine].match(ACQUIRE_CALL_RE);
+      const acquireCall = (acquireMatch ? acquireMatch[0] : lines[acquireLine]).trim();
+
+      hits.push({
+        line: i + 1,
+        ruleId: "destructive-before-confirm",
+        kind: "unsafe-cutover",
+        summary: `destructive '${destroyCall}' runs before the fallible '${acquireCall}' whose failure returns without restoring it — acquire/confirm the replacement before destroying the incumbent`,
+        evidenceLine: destructiveLine.trim(),
+      });
+    }
+  }
+
+  return hits;
+}
+
+/**
+ * R5: leak-on-error-return (crabbox #1099 shape). A resource acquired via a fallible
+ * two-value call (`x, err := conn.Dial(...)`, `.Connect/.Open/.Acquire/.New*`,
+ * `os.Open*`) whose cleanup IS deferred later in the same function (`defer x.Close()`),
+ * but an early/error `return` sits BETWEEN the acquisition and that defer — so the
+ * return path leaks the resource before its cleanup is registered.
+ *
+ * High-precision by construction: it requires a real `defer x.<cleanup>()` to exist
+ * (the code demonstrably intends local cleanup of x), and abstains when the only
+ * pre-defer return is the acquisition's own `if err != nil { return }` (x is invalid
+ * there) or when x is returned to the caller (ownership transfer, where you would not
+ * defer-close it locally). The fix point is the acquisition: register the defer
+ * immediately after it. Suppressible with `// concurrency-ok:`.
+ */
+function ruleLeakOnErrorReturn(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  const ACQUIRE_RE =
+    /\b(\w+)\s*,\s*err\b\s*:?=\s*[\w.]+\.(?:Dial|Connect|Open|Acquire|New\w*|Reserve|Provision)\s*\(/;
+  const OSOPEN_RE = /\b(\w+)\s*,\s*err\b\s*:?=\s*os\.(?:Open|OpenFile|Create)\s*\(/;
+  const ERR_CHECK_RE = /^\s*if\s+err\s*!=\s*nil\s*\{/;
+  const FUNC_DECL_RE = /^\s*func\b/;
+  const CLEANUP = "Close|Stop|Release|Cancel|Cleanup|Disconnect|Shutdown|Abort";
+
+  // Function ranges by brace depth (same construction as ruleDestructiveBeforeConfirm)
+  // so the acquisition/defer/return windows never bleed across unrelated functions.
+  const ranges: Array<[number, number]> = [];
+  {
+    let depth = 0;
+    let funcStart = -1;
+    let funcDepth = -1;
+    lines.forEach((text, i) => {
+      if (funcDepth === -1 && FUNC_DECL_RE.test(text)) {
+        funcStart = i;
+        funcDepth = depth;
+      }
+      depth += (text.match(/\{/g) || []).length - (text.match(/\}/g) || []).length;
+      if (funcDepth !== -1 && depth <= funcDepth) {
+        ranges.push([funcStart, i]);
+        funcDepth = -1;
+        funcStart = -1;
+      }
+    });
+  }
+
+  for (const [start, end] of ranges) {
+    for (let i = start; i <= end; i++) {
+      const m = lines[i].match(ACQUIRE_RE) ?? lines[i].match(OSOPEN_RE);
+      if (!m) continue;
+      const x = m[1];
+
+      // The first `defer x.<cleanup>()` (or `defer x()` for a captured cancel func).
+      const deferRe = new RegExp(
+        `^\\s*defer\\s+${x}[?]?\\.(?:${CLEANUP})\\w*\\s*\\(|^\\s*defer\\s+${x}\\s*\\(\\s*\\)`,
+      );
+      let deferLine = -1;
+      for (let j = i + 1; j <= end; j++) {
+        if (deferRe.test(lines[j])) {
+          deferLine = j;
+          break;
+        }
+      }
+      if (deferLine === -1) continue; // no local cleanup for x → abstain (fuzzy, leave to the hunt)
+
+      // Ownership transfer → abstain: x itself returned to the caller (a returned value,
+      // not merely used as an argument like `return doWork(x)`).
+      const returnsX = new RegExp(
+        `return\\s+&?\\b${x}\\b(?![.(\\w])|return\\s+[\\w.]+\\s*,\\s*&?\\b${x}\\b(?![.(\\w])`,
+      );
+      let transferred = false;
+      for (let j = i + 1; j <= end; j++) {
+        if (returnsX.test(lines[j])) {
+          transferred = true;
+          break;
+        }
+      }
+      if (transferred) continue;
+
+      // Skip the acquisition's own immediate `if err != nil { ... return ... }` block —
+      // on that path x is invalid, so bailing without closing it is correct.
+      let scanStart = i + 1;
+      if (ERR_CHECK_RE.test(lines[i + 1] ?? "")) {
+        let d = 0;
+        for (let j = i + 1; j <= end; j++) {
+          d += (lines[j].match(/\{/g) || []).length - (lines[j].match(/\}/g) || []).length;
+          if (j > i + 1 && d <= 0) {
+            scanStart = j + 1;
+            break;
+          }
+        }
+      }
+
+      // Any return between the acquisition (past its err-check) and the defer leaks x.
+      for (let j = scanStart; j < deferLine; j++) {
+        if (/^\s*return\b/.test(lines[j])) {
+          hits.push({
+            line: i + 1,
+            ruleId: "leak-on-error-return",
+            kind: "goroutine-leak",
+            summary: `'${x}' is acquired here but an early return (line ${j + 1}) bails before its 'defer ${x}.Close()' (line ${deferLine + 1}) is registered — the resource leaks on that path; move the defer to immediately after acquiring '${x}'`,
+            evidenceLine: lines[i].trim(),
+          });
+          break;
+        }
+      }
+    }
+  }
+  return hits;
+}
+
+const RULES = [
+  ruleTimerWithoutStop,
+  ruleRangeOverTickerNoExit,
+  ruleWaitGroupAddInGoroutine,
+  ruleDestructiveBeforeConfirm,
+  ruleLeakOnErrorReturn,
+];
 
 /**
  * Lint the touched line ranges of Go files. Only `.go` non-test files are scanned;
