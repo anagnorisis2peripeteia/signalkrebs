@@ -248,6 +248,45 @@ test("lint: leak-on-error-return abstains when only the acquisition's own err-ch
   });
 });
 
+// --- shadowed-retry-state (crabbox #1101 bug class) ---
+
+test("lint: shadowed-retry-state fires on an accumulating backoff counter :='d inside the loop", () => {
+  const src = [
+    "package cli",
+    "func reconnect() {",
+    "  for {",
+    "    attempt := 0",
+    "    delay := backoffFor(attempt)",
+    "    time.Sleep(delay)",
+    "    attempt++",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "r.go": src }, (dir) => {
+    const hits = lintGo(dir, ["r.go"]).filter((d) => d.ruleId === "shadowed-retry-state" && !d.suppressed);
+    assert.equal(hits.length, 1, "the accumulating 'attempt' reset fires; the derived 'delay' does not");
+    assert.match(hits[0].summary, /attempt/);
+  });
+});
+
+test("lint: shadowed-retry-state abstains when the counter is hoisted above the loop", () => {
+  const src = [
+    "package cli",
+    "func reconnect() {",
+    "  attempt := 0",
+    "  for {",
+    "    delay := backoffFor(attempt)",
+    "    time.Sleep(delay)",
+    "    attempt++",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "r.go": src }, (dir) => {
+    const hits = lintGo(dir, ["r.go"]).filter((d) => d.ruleId === "shadowed-retry-state" && !d.suppressed);
+    assert.equal(hits.length, 0);
+  });
+});
+
 test("lint: destructive-before-confirm does NOT fire on the safe order (acquire first, destroy after)", () => {
   // steipete's actual fix: create the ticket first, only stop the old daemon
   // once the replacement is confirmed obtainable.

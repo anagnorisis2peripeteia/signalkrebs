@@ -366,12 +366,84 @@ function ruleLeakOnErrorReturn(lines: string[]): RawHit[] {
   return hits;
 }
 
+/**
+ * R6: shadowed-retry-state (crabbox #1101). A backoff/attempt/delay counter declared
+ * with `:=` INSIDE a retry loop body is re-created every iteration, so the backoff
+ * never grows and the code hammers the peer at a fixed interval. Flags a `<name> :=`
+ * whose name reads as retry state (attempt/backoff/retr/delay/wait/elapsed) inside a
+ * `for` loop body — unless the same name is already declared before the loop (hoisted),
+ * in which case the `:=` is a genuine inner scope and there is no reset bug.
+ */
+function ruleShadowedRetryState(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  const RETRY_DECL = /^\s*(\w*(?:attempt|backoff|retr|delay|wait|elapsed)\w*)\s*:=/i;
+  const FOR_RE = /^\s*for\b[^;]*\{\s*$/; // `for {`, `for cond {` — not a 3-clause `for i := ...`
+
+  // Brace-matched ranges for each `for` loop.
+  const loops: Array<[number, number]> = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!FOR_RE.test(lines[i])) continue;
+    let depth = 0;
+    let started = false;
+    for (let j = i; j < lines.length; j++) {
+      depth += (lines[j].match(/\{/g) || []).length - (lines[j].match(/\}/g) || []).length;
+      if (!started && depth > 0) started = true;
+      if (started && depth === 0) {
+        loops.push([i, j]);
+        break;
+      }
+    }
+  }
+
+  for (const [start, end] of loops) {
+    for (let i = start + 1; i < end; i++) {
+      const m = lines[i].match(RETRY_DECL);
+      if (!m) continue;
+      const name = m[1];
+      // Only an ACCUMULATOR reset is the bug: the var must be grown later in the loop
+      // (`name++`, `name += …`, `name *= …`, `name = …name…`). A derived per-iteration value
+      // like `delay := backoffFor(attempt)` is correctly recomputed each pass — abstain.
+      const accumulates = new RegExp(
+        `\\b${name}\\s*(?:\\+\\+|--|\\+=|-=|\\*=)|\\b${name}\\s*=\\s*[^=][^\\n]*\\b${name}\\b`,
+      );
+      let grows = false;
+      for (let j = i + 1; j < end; j++) {
+        if (accumulates.test(lines[j])) {
+          grows = true;
+          break;
+        }
+      }
+      if (!grows) continue;
+      // Abstain if the name is already declared/assigned before the loop (hoisted → the
+      // inner `:=` is a legitimately-scoped different variable, not a reset of retry state).
+      const declBefore = new RegExp(`\\b${name}\\b\\s*(?::=|=[^=])|\\bvar\\s+${name}\\b`);
+      let hoisted = false;
+      for (let j = 0; j < start; j++) {
+        if (declBefore.test(lines[j])) {
+          hoisted = true;
+          break;
+        }
+      }
+      if (hoisted) continue;
+      hits.push({
+        line: i + 1,
+        ruleId: "shadowed-retry-state",
+        kind: "toctou",
+        summary: `retry/backoff state '${name}' is re-declared with ':=' inside the loop — it resets every iteration, so the backoff never grows and the peer is hammered at a fixed interval; hoist '${name}' above the loop`,
+        evidenceLine: lines[i].trim(),
+      });
+    }
+  }
+  return hits;
+}
+
 const RULES = [
   ruleTimerWithoutStop,
   ruleRangeOverTickerNoExit,
   ruleWaitGroupAddInGoroutine,
   ruleDestructiveBeforeConfirm,
   ruleLeakOnErrorReturn,
+  ruleShadowedRetryState,
 ];
 
 /**
