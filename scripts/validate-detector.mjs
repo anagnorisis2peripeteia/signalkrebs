@@ -85,6 +85,16 @@ const SPECS = {
     // the planted flake's data race anchors in the *_test.go source frame
     anchorAny: ["flake_test.go", "interleavingstress"],
   },
+  "swift-async": {
+    toolchain: "swift",
+    racyFixture: "fixtures/swift-async",
+    racyChanged: ["Sources/Leak/Leak.swift"],
+    cleanFixture: "fixtures/swift-async-clean",
+    cleanChanged: ["Sources/Clean/Clean.swift"],
+    config: { timeoutMs: 180000 },
+    // the SA001 continuation-leak anchors in the source; the dynamic hang anchors at the package
+    anchorAny: ["Leak.swift", "Leak"],
+  },
 };
 
 function haveBinary(bin) {

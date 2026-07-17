@@ -14,9 +14,10 @@ export type DetectorTool =
   | "dotnet-conc"
   | "py-async"
   | "rust-loom"
-  | "interleaving-stress";
+  | "interleaving-stress"
+  | "swift-async";
 
-export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan", "ts-async", "dotnet-conc", "py-async", "rust-loom", "interleaving-stress"];
+export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan", "ts-async", "dotnet-conc", "py-async", "rust-loom", "interleaving-stress", "swift-async"];
 
 /** Terminal verdicts, most-benign first. Only `clean` exits 0. */
 export type Verdict =
@@ -44,6 +45,7 @@ export type DefectKind =
   | "waitgroup-misuse" // Add-after-Wait, missing Done on an error path
   | "unsafe-cutover" // destructive teardown before a fallible replacement acquisition; failure leaves the resource destroyed
   | "deadlock" // dynamic probe: a test hung forever (self-deadlock, undrained task, blocked join)
+  | "continuation-misuse" // a CheckedContinuation/AsyncStream never resumed/finished or resumed twice
   | "anti-pattern"; // static lint hit on a touched line (hard-fail per gate policy)
 
 /** Whether a defect came from running code (dynamic) or reading it (static). */

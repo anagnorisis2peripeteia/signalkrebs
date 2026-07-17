@@ -16,3 +16,4 @@ fixtures/**/target/
 fixtures/**/.build/
 fixtures/**/Cargo.lock
 fixtures/**/TestResults/
+runtime/**/.build/

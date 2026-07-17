@@ -16,6 +16,7 @@ const { lintTs } = await import(pathToFileURL(join(ROOT, "dist/lint/ts-lint.js")
 const { parseScopeEntry } = await import(pathToFileURL(join(ROOT, "dist/git-changed-files.js")).href);
 const { parseHangOutput } = await import(pathToFileURL(join(ROOT, "dist/detectors/dotnet-conc.js")).href);
 const { shuffleSeed, testFailed } = await import(pathToFileURL(join(ROOT, "dist/detectors/interleaving-stress.js")).href);
+const { parseHungTest } = await import(pathToFileURL(join(ROOT, "dist/detectors/swift-async.js")).href);
 
 function exercise(over) {
   return {
@@ -840,4 +841,25 @@ test("interleaving-stress: testFailed distinguishes a real FAIL from a build err
   assert.equal(testFailed("ok  \tinterleavingstress\t0.30s"), false, "a passing run is not a failure");
   // a build failure must NOT be read as an interleaving flake — that is not our finding
   assert.equal(testFailed("./flake_test.go:9:2: undefined: counter\nFAIL\tinterleavingstress [build failed]"), false);
+});
+
+test("swift-async hang probe: names the test that started but never finished (swift-async)", () => {
+  // Real XCTest output shape: a hung test has a 'started' with no matching 'passed'/'failed'.
+  const out = [
+    "Test Suite 'All tests' started at 2026-07-17 11:00:00.000",
+    "Test Suite 'LeakPackageTests.xctest' started at 2026-07-17 11:00:00.001",
+    "Test Suite 'HangTests' started at 2026-07-17 11:00:00.001",
+    "Test Case '-[LeakTests.HangTests testHangs]' started.",
+  ].join("\n");
+  assert.equal(parseHungTest(out), "-[LeakTests.HangTests testHangs]");
+});
+
+test("swift-async hang probe: a suite that finishes has no hung test (swift-async)", () => {
+  const out = [
+    "Test Case '-[CleanTests.CleanTests testFetch]' started.",
+    "Test Case '-[CleanTests.CleanTests testFetch]' passed (0.001 seconds).",
+    "Test Suite 'All tests' passed at 2026-07-17 11:00:01.000",
+  ].join("\n");
+  assert.equal(parseHungTest(out), null);
+  assert.equal(parseHungTest("Test Suite 'All tests' started"), null, "no test case started at all");
 });

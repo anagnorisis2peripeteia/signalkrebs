@@ -18,7 +18,7 @@ import { lintSwift } from "../lint/swift-lint.js";
 const SELF_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SWIFT_FIXTURE = join(SELF_ROOT, "fixtures", "swift-tsan");
 
-interface SwiftExec {
+export interface SwiftExec {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -26,7 +26,7 @@ interface SwiftExec {
   spawnError: string | null;
 }
 
-function runSwift(dir: string, args: string[], timeoutMs: number): SwiftExec {
+export function runSwift(dir: string, args: string[], timeoutMs: number): SwiftExec {
   try {
     const stdout = execFileSync("swift", args, {
       cwd: dir,
@@ -56,7 +56,7 @@ function runSwift(dir: string, args: string[], timeoutMs: number): SwiftExec {
 }
 
 /** Nearest ancestor directory (within repoDir) containing a Package.swift. */
-function swiftPackageOf(repoDir: string, file: string): string | null {
+export function swiftPackageOf(repoDir: string, file: string): string | null {
   let dir = dirname(file);
   for (;;) {
     if (existsSync(join(repoDir, dir, "Package.swift"))) return dir === "." ? "." : dir;
@@ -66,7 +66,7 @@ function swiftPackageOf(repoDir: string, file: string): string | null {
   }
 }
 
-function packageHasTests(repoDir: string, pkgDir: string): boolean {
+export function packageHasTests(repoDir: string, pkgDir: string): boolean {
   return existsSync(join(repoDir, pkgDir === "." ? "Tests" : join(pkgDir, "Tests")));
 }
 
