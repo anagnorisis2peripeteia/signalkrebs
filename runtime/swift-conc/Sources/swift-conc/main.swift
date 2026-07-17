@@ -132,6 +132,19 @@ func countResumes(_ node: some SyntaxProtocol, _ cont: String, _ conv: SourceLoc
     let c = MemberCallCollector(cont, "resume", conv); c.walk(node); return c.lines
 }
 
+/// Does `base.member` appear anywhere below a node (a member ACCESS, not necessarily a call)?
+final class MemberAccessFinder: SyntaxVisitor {
+    let base: String, member: String; var found = false
+    init(_ base: String, _ member: String) { self.base = base; self.member = member; super.init(viewMode: .sourceAccurate) }
+    override func visit(_ n: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
+        if n.declName.baseName.text == member, n.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == base { found = true }
+        return .visitChildren
+    }
+}
+func referencesMember(_ node: some SyntaxProtocol, _ base: String, _ member: String) -> Bool {
+    let v = MemberAccessFinder(base, member); v.walk(node); return v.found
+}
+
 // ---------- the analyzer ----------
 
 final class ConcurrencyAnalyzer: SyntaxVisitor {
@@ -198,10 +211,14 @@ final class ConcurrencyAnalyzer: SyntaxVisitor {
         let cont = closureParamName(closure)
         let finishes = MemberCallCollector(cont, "finish", conv); finishes.walk(closure.statements)
         let escapes = continuationEscapes(closure.statements, cont)
-        if finishes.lines.isEmpty && !escapes {
+        // Setting onTermination marks a MANAGED / intentionally-infinite stream (an observation
+        // stream that cleans up on cancel and is never meant to "end") — not calling finish() there
+        // is correct, not a leak.
+        let managed = referencesMember(closure.statements, cont, "onTermination")
+        if finishes.lines.isEmpty && !escapes && !managed {
             findings.append(Finding(
                 Rule: "SA003", Kind: "continuation-misuse", File: file, Line: line(call),
-                Message: "advisory: `\(name)` closure never calls `\(cont).finish()` and does not store the continuation — consumers may hang waiting for the stream to end"))
+                Message: "advisory: `\(name)` closure never calls `\(cont).finish()`, sets no onTermination handler, and does not store the continuation — consumers may hang waiting for the stream to end"))
         }
     }
 
