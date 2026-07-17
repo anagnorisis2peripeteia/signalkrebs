@@ -150,7 +150,51 @@ function ruleUnsafeCutover(lines: string[]): RawHit[] {
   return detectReassignCutover(lines, TS_CUTOVER_CFG).map((h) => ({ ...h, kind: h.kind as RawHit["kind"] }));
 }
 
-const CUSTOM_RULES = [ruleIntervalNeverCleared, ruleGlobalListenerNeverRemoved, ruleUnsafeCutover];
+// leak-on-error (Go's flagship, ported — signalkrebs #16 item 3). A resource handle acquired via a
+// fallible await that must be explicitly closed, where the function then bails (return/throw) and the
+// handle is NEVER closed anywhere in its scope and does not escape (returned / assigned out / passed).
+// High-precision by construction: a try/finally that closes it, or `return handle`, both abstain.
+function ruleLeakOnError(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  // Direct-ownership handles only: `.open()` → handle.close(), `.acquire()` → client.release(). NOT
+  // `.connect()`, whose result is usually a view into a manager-owned connection closed elsewhere
+  // (mcporter: `runtime.connect()` closed by the caller's `runtime.close()` — a false positive).
+  const ACQUIRE_RE = /\b(?:const|let)\s+(\w+)\s*=\s*await\s+[\w.$]*\.(?:open|acquire)\s*\(/;
+  const CLOSE = "close|release|destroy|dispose|end|unref|disconnect|free|cleanup";
+  lines.forEach((text, i) => {
+    const am = text.match(ACQUIRE_RE);
+    if (!am) return;
+    if (isInStringLiteral(text, text.search(ACQUIRE_RE))) return;
+    const h = am[1];
+    // The enclosing block of the acquisition.
+    let depth = 0;
+    let end = lines.length - 1;
+    for (let j = i + 1; j < lines.length; j++) {
+      depth += (lines[j].match(/{/g) || []).length - (lines[j].match(/}/g) || []).length;
+      if (depth < 0) {
+        end = j;
+        break;
+      }
+    }
+    const scope = lines.slice(i + 1, end + 1).join("\n");
+    const closeRe = new RegExp(`\\b${h}\\??\\.(?:${CLOSE})\\s*\\(`); // handle.close() anywhere → safe (incl. finally)
+    const escapeRe = new RegExp(`(?:return\\s+|[=,(\\[]\\s*)\\b${h}\\b`); // returned / assigned out / passed → owned elsewhere
+    if (closeRe.test(scope)) return;
+    if (escapeRe.test(scope)) return;
+    const bail = scope.match(/\b(return|throw)\b/);
+    if (!bail) return;
+    hits.push({
+      line: i + 1,
+      ruleId: "leak-on-error-return",
+      kind: "goroutine-leak",
+      summary: `resource '${h}' is acquired via await but never closed on the ${bail[1]} path — the early exit leaks it; close it (try/finally) before bailing`,
+      evidenceLine: text.trim(),
+    });
+  });
+  return hits;
+}
+
+const CUSTOM_RULES = [ruleIntervalNeverCleared, ruleGlobalListenerNeverRemoved, ruleUnsafeCutover, ruleLeakOnError];
 
 /**
  * ESLint pass over the touched files, using signalkrebs' own bundled eslint +

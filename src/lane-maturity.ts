@@ -40,7 +40,7 @@ export const LANE_MATURITY: Record<DetectorTool, LaneMaturity> = {
   },
   "ts-async": {
     hasStaticLint: true,
-    hardRules: ["destructive-before-confirm"],
+    hardRules: ["destructive-before-confirm", "leak-on-error-return"],
     suppression: "pragma",
     testFilePolicy: "advisory",
     racyFixture: "fixtures/ts-async",

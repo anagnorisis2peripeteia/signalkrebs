@@ -1022,3 +1022,21 @@ test("py-async: flags a bare unawaited coroutine, not an awaited/assigned one (#
     assert.equal(hits.length, 0, "awaited and assigned coroutines are fine");
   });
 });
+
+test("ts lint: leak-on-error fires on an opened handle never closed before bail, abstains on close/escape (#16 item 3)", () => {
+  const leak = ["async function read(p) {", "  const fh = await fs.open(p, 'r');", "  if (bad) return null;", "  return await fh.read();", "}"].join("\n");
+  withRepo({ "a.ts": leak }, (dir) => {
+    const hits = lintTs(dir, ["a.ts"]).filter((d) => d.ruleId === "leak-on-error-return" && !d.suppressed);
+    assert.equal(hits.length, 1, "fh opened, never closed, bails → leak");
+  });
+  const finallyOk = ["async function read(p) {", "  const fh = await fs.open(p, 'r');", "  try { if (bad) return null; return await fh.read(); }", "  finally { await fh.close(); }", "}"].join("\n");
+  withRepo({ "b.ts": finallyOk }, (dir) => {
+    const hits = lintTs(dir, ["b.ts"]).filter((d) => d.ruleId === "leak-on-error-return" && !d.suppressed);
+    assert.equal(hits.length, 0, "closed in finally → no leak");
+  });
+  const escapes = ["async function borrow() {", "  const client = await pool.acquire();", "  return client;", "}"].join("\n");
+  withRepo({ "c.ts": escapes }, (dir) => {
+    const hits = lintTs(dir, ["c.ts"]).filter((d) => d.ruleId === "leak-on-error-return" && !d.suppressed);
+    assert.equal(hits.length, 0, "returned handle escapes → owned by the caller");
+  });
+});
