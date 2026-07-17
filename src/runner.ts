@@ -16,6 +16,7 @@ import { tsAsyncAdapter } from "./detectors/ts-async.js";
 import { dotnetConcAdapter } from "./detectors/dotnet-conc.js";
 import { pyAsyncAdapter } from "./detectors/py-async.js";
 import { rustLoomAdapter } from "./detectors/rust-loom.js";
+import { interleavingStressAdapter } from "./detectors/interleaving-stress.js";
 
 // A lane stays quarantined until its planted-defect fixture proves the detector
 // actually catches a race via scripts/validate-detector.mjs. Same discipline as
@@ -32,6 +33,7 @@ const ADAPTERS: Partial<Record<DetectorTool, DetectorAdapter>> = {
   "dotnet-conc": dotnetConcAdapter,
   "py-async": pyAsyncAdapter,
   "rust-loom": rustLoomAdapter,
+  "interleaving-stress": interleavingStressAdapter,
 };
 
 /**

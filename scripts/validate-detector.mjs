@@ -75,6 +75,16 @@ const SPECS = {
     cleanChanged: ["src/lib.rs"],
     config: { timeoutMs: 300000 },
   },
+  "interleaving-stress": {
+    toolchain: "go",
+    racyFixture: "fixtures/interleaving-stress",
+    racyChanged: ["stress.go"],
+    cleanFixture: "fixtures/interleaving-clean",
+    cleanChanged: ["clean.go"],
+    config: { reps: 30, gomaxprocs: [8], timeoutMs: 120000 },
+    // the planted flake's data race anchors in the *_test.go source frame
+    anchorAny: ["flake_test.go", "interleavingstress"],
+  },
 };
 
 function haveBinary(bin) {

@@ -18,7 +18,7 @@ import { lintGo } from "../lint/go-lint.js";
 const SELF_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const GO_RACE_FIXTURE = join(SELF_ROOT, "fixtures", "go-race");
 
-interface GoExec {
+export interface GoExec {
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -26,7 +26,7 @@ interface GoExec {
   spawnError: string | null;
 }
 
-function runGo(dir: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): GoExec {
+export function runGo(dir: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): GoExec {
   try {
     const stdout = execFileSync("go", args, {
       cwd: dir,
@@ -57,7 +57,7 @@ function runGo(dir: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: n
 }
 
 /** Map a touched .go file to its package's import path via `go list`. */
-function packageOf(repoDir: string, file: string): string | null {
+export function packageOf(repoDir: string, file: string): string | null {
   const pkgDir = dirname(file);
   const res = runGo(repoDir, ["list", "./" + pkgDir], {}, 30_000);
   if (res.exitCode !== 0) return null;
@@ -65,7 +65,7 @@ function packageOf(repoDir: string, file: string): string | null {
 }
 
 /** Does this package directory contain any *_test.go files? */
-function hasTests(repoDir: string, file: string): boolean {
+export function hasTests(repoDir: string, file: string): boolean {
   const abs = join(repoDir, dirname(file));
   try {
     return readdirSync(abs).some((f) => f.endsWith("_test.go"));
@@ -79,7 +79,7 @@ function hasTests(repoDir: string, file: string): boolean {
  * block carries two stack frames; we keep the block verbatim as evidence and pin
  * the defect to the first in-repo source frame.
  */
-function parseRaceReports(output: string): ConcurrencyDefect[] {
+export function parseRaceReports(output: string): ConcurrencyDefect[] {
   const defects: ConcurrencyDefect[] = [];
   const blocks = output.split("WARNING: DATA RACE").slice(1);
   for (const raw of blocks) {

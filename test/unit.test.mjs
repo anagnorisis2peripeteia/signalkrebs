@@ -14,6 +14,8 @@ const { lintGo } = await import(pathToFileURL(join(ROOT, "dist/lint/go-lint.js")
 const { lintSwift } = await import(pathToFileURL(join(ROOT, "dist/lint/swift-lint.js")).href);
 const { lintTs } = await import(pathToFileURL(join(ROOT, "dist/lint/ts-lint.js")).href);
 const { parseScopeEntry } = await import(pathToFileURL(join(ROOT, "dist/git-changed-files.js")).href);
+const { parseHangOutput } = await import(pathToFileURL(join(ROOT, "dist/detectors/dotnet-conc.js")).href);
+const { shuffleSeed, testFailed } = await import(pathToFileURL(join(ROOT, "dist/detectors/interleaving-stress.js")).href);
 
 function exercise(over) {
   return {
@@ -797,4 +799,45 @@ test("harvest: extracts a real leak-on-error hit into a fixture that reproduces 
       rmSync(out, { recursive: true, force: true });
     }
   });
+});
+
+test("dotnet-conc hang probe: parses the real blame-hang output, names the hung test (#1 dynamic)", () => {
+  // Verbatim from a real `dotnet test --blame-hang` run against the deadlock fixture.
+  const out = [
+    "A total of 1 test files matched the specified pattern.",
+    "The active test run was aborted. Reason: Test host process crashed",
+    "Data collector 'Blame' message: The specified inactivity time of 12 seconds has elapsed. Collecting hang dumps from testhost and its child processes.",
+    "",
+    "Test Run Aborted.",
+    "The test running when the crash occurred: ",
+    "DeadlockTest.SelfDeadlocksOnSemaphore",
+    "",
+    "This test may, or may not be the source of the crash.",
+  ].join("\n");
+  const r = parseHangOutput(out);
+  assert.equal(r.hung, true, "the inactivity-elapsed line marks a hang");
+  assert.equal(r.test, "DeadlockTest.SelfDeadlocksOnSemaphore", "names the exact hung test");
+});
+
+test("dotnet-conc hang probe: a suite that terminates is not a hang", () => {
+  const out = [
+    "A total of 3 test files matched the specified pattern.",
+    "Passed!  - Failed: 0, Passed: 12, Skipped: 0, Total: 12, Duration: 340 ms",
+  ].join("\n");
+  const r = parseHangOutput(out);
+  assert.equal(r.hung, false);
+  assert.equal(r.test, null);
+});
+
+test("interleaving-stress: captures the -shuffle seed for reproduction (#11)", () => {
+  const out = "-test.shuffle 1737052848123456789\n--- FAIL: TestPlantedFlake (0.00s)";
+  assert.equal(shuffleSeed(out), "1737052848123456789");
+  assert.equal(shuffleSeed("ok  interleavingstress  0.3s"), null);
+});
+
+test("interleaving-stress: testFailed distinguishes a real FAIL from a build error (#11)", () => {
+  assert.equal(testFailed("--- FAIL: TestPlantedFlake (0.00s)\nFAIL\nexit status 1"), true, "a genuine test failure");
+  assert.equal(testFailed("ok  \tinterleavingstress\t0.30s"), false, "a passing run is not a failure");
+  // a build failure must NOT be read as an interleaving flake — that is not our finding
+  assert.equal(testFailed("./flake_test.go:9:2: undefined: counter\nFAIL\tinterleavingstress [build failed]"), false);
 });

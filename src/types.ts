@@ -7,9 +7,16 @@
 // was actually EXERCISED under parallelism, and nothing surfaced within the
 // stress budget. Every degenerate state is an explicit non-passing verdict.
 
-export type DetectorTool = "go-race" | "swift-tsan" | "ts-async" | "dotnet-conc" | "py-async" | "rust-loom";
+export type DetectorTool =
+  | "go-race"
+  | "swift-tsan"
+  | "ts-async"
+  | "dotnet-conc"
+  | "py-async"
+  | "rust-loom"
+  | "interleaving-stress";
 
-export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan", "ts-async", "dotnet-conc", "py-async", "rust-loom"];
+export const DETECTOR_TOOLS: DetectorTool[] = ["go-race", "swift-tsan", "ts-async", "dotnet-conc", "py-async", "rust-loom", "interleaving-stress"];
 
 /** Terminal verdicts, most-benign first. Only `clean` exits 0. */
 export type Verdict =
@@ -36,6 +43,7 @@ export type DefectKind =
   | "channel-misuse" // send-on-closed, double-close, or blocked-forever receive
   | "waitgroup-misuse" // Add-after-Wait, missing Done on an error path
   | "unsafe-cutover" // destructive teardown before a fallible replacement acquisition; failure leaves the resource destroyed
+  | "deadlock" // dynamic probe: a test hung forever (self-deadlock, undrained task, blocked join)
   | "anti-pattern"; // static lint hit on a touched line (hard-fail per gate policy)
 
 /** Whether a defect came from running code (dynamic) or reading it (static). */
