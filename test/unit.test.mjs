@@ -863,3 +863,78 @@ test("swift-async hang probe: a suite that finishes has no hung test (swift-asyn
   assert.equal(parseHungTest(out), null);
   assert.equal(parseHungTest("Test Suite 'All tests' started"), null, "no test case started at all");
 });
+
+test("lint: unsafe-cutover abstains on a deferred Close (runs at function exit, not before)", () => {
+  const src = [
+    "package p",
+    "func restore(source string) error {",
+    "  src, err := os.Open(source)",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  defer func() { _ = src.Close() }()",
+    "  gz, err := gzip.NewReader(src)",
+    "  if err != nil {",
+    "    return err",
+    "  }",
+    "  _ = gz",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const hits = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 0, "defer src.Close() is cleanup-at-exit — gzip.NewReader(src) reads a valid file");
+  });
+});
+
+test("lint: unsafe-cutover abstains when the Close is error-path cleanup that returns", () => {
+  const src = [
+    "package p",
+    "func open(path string) (*os.File, error) {",
+    "  root, err := os.OpenRoot(path)",
+    "  if err != nil {",
+    "    return nil, err",
+    "  }",
+    "  info, err := root.Stat(\".\")",
+    "  if err != nil {",
+    "    _ = root.Close()",
+    "    return nil, err",
+    "  }",
+    "  _ = info",
+    "  dirFile, err := root.Open(\".\")",
+    "  if err != nil {",
+    "    return nil, err",
+    "  }",
+    "  return dirFile, nil",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const hits = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 0, "root.Close() is on a guard path that returns; root.Open() is on the fall-through path");
+  });
+});
+
+test("lint: unsafe-cutover abstains when the variable is reassigned between Close and acquire", () => {
+  const src = [
+    "package p",
+    "func walk(current *os.Root, comps []string) (*os.File, error) {",
+    "  for _, c := range comps {",
+    "    next, err := current.OpenRoot(c)",
+    "    if err != nil {",
+    "      return nil, err",
+    "    }",
+    "    _ = current.Close()",
+    "    current = next",
+    "  }",
+    "  openedFile, err := current.Open(\".\")",
+    "  if err != nil {",
+    "    return nil, err",
+    "  }",
+    "  return openedFile, nil",
+    "}",
+  ].join("\n");
+  withRepo({ "s.go": src }, (dir) => {
+    const hits = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "destructive-before-confirm" && !d.suppressed);
+    assert.equal(hits.length, 0, "current is reassigned to next between Close and Open — a different object");
+  });
+});

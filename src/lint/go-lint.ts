@@ -275,6 +275,26 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
       // #2 precision: don't fire on an UNRELATED teardown+setup (they must share a resource ident).
       if (!sharesResource(destructiveLine, lines[acquireLine])) continue;
 
+      // If the destroyed variable is REASSIGNED between the Close and the acquisition, the acquire
+      // operates on a DIFFERENT object that merely reuses the name — not a use-after-destroy. This is
+      // the directory-descent walk (`current.Close(); current = next; … current.Open(".")`).
+      // (gogcli drive_sync_push.go.)
+      const recvMatch = destructiveLine.match(
+        /([\w]+)\.(?:stop|close|delete|remove|teardown|destroy|kill|unregister|revoke|release)\w*\s*\(/i,
+      );
+      const recv = recvMatch?.[1];
+      if (recv) {
+        const reassignRe = new RegExp(`\\b${recv}\\b\\s*(?:,[^=\\n]*)?:?=[^=]`);
+        let reassigned = false;
+        for (let j = i + 1; j < acquireLine; j++) {
+          if (reassignRe.test(lines[j])) {
+            reassigned = true;
+            break;
+          }
+        }
+        if (reassigned) continue;
+      }
+
       const destroyMatch = destructiveLine.match(DESTRUCTIVE_CALL_RE);
       const destroyCall = (destroyMatch ? destroyMatch[0] : destructiveLine).trim();
       const acquireMatch = lines[acquireLine].match(ACQUIRE_CALL_RE);
