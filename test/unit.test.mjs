@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -757,5 +758,43 @@ test("lint: suppression-rot silent on a pragma that actually suppresses a hit", 
   withRepo({ "s.go": src }, (dir) => {
     const rot = lintGo(dir, ["s.go"]).filter((d) => d.ruleId === "reasonless-suppression" || d.ruleId === "stale-suppression");
     assert.equal(rot.length, 0, "the pragma suppresses the timer-without-stop hit → not stale");
+  });
+});
+
+test("harvest: extracts a real leak-on-error hit into a fixture that reproduces the detection (#14)", () => {
+  // A source whose enclosing function leaks an opened file on an error-return before defer.
+  const src = [
+    "package server",
+    "import \"os\"",
+    "func openAndValidate(path string, ok bool) error {",
+    "\tf, err := os.Open(path)",
+    "\tif err != nil {",
+    "\t\treturn err",
+    "\t}",
+    "\tif !ok {",
+    "\t\treturn errValidation",
+    "\t}",
+    "\tdefer f.Close()",
+    "\treturn nil",
+    "}",
+  ].join("\n");
+  withRepo({ "leak.go": src }, (dir) => {
+    const out = mkdtempSync(join(tmpdir(), "sk-harvest-"));
+    try {
+      const script = join(ROOT, "scripts", "harvest-fixture.mjs");
+      // reported line 9 (the error-return the user saw) — the rule anchors at the acquire,
+      // but rule-identity matching finds it in the same enclosing function.
+      const stdout = execFileSync("node", [script, "--repo", dir, "--file", "leak.go",
+        "--line", "9", "--lane", "go-race", "--name", "hv", "--out", out], { encoding: "utf8" });
+      assert.match(stdout, /reproduces detection: \[leak-on-error-return\]/);
+      const fixture = readFileSync(join(out, "hv.go"), "utf8");
+      assert.match(fixture, /^package harvested/);
+      assert.match(fixture, /os\.Open\(path\)/);
+      // and the harvested fixture independently re-fires the same rule
+      const rehit = lintGo(out, ["hv.go"]).filter((d) => !d.suppressed);
+      assert.ok(rehit.some((h) => h.ruleId === "leak-on-error-return"), "harvested fixture re-fires the rule");
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
   });
 });
