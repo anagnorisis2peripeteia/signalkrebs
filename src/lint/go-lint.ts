@@ -210,6 +210,9 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
       const destructiveLine = lines[i];
       if (FUNC_DECL_RE.test(destructiveLine)) continue; // a `func stopFoo(...)` definition, not a call
       if (!DESTRUCTIVE_RE.test(destructiveLine)) continue;
+      // A `defer ...Close()` runs at function EXIT, not before the acquisition — it is cleanup, never
+      // a cutover destroy. (discrawl share.go: `defer file.Close()` before `gzip.NewReader(file)`.)
+      if (/^\s*defer\b/.test(destructiveLine)) continue;
 
       // Find the next fallible two-value acquisition within the window.
       const windowEnd = Math.min(end, i + WINDOW);
@@ -233,6 +236,19 @@ function ruleDestructiveBeforeConfirm(lines: string[]): RawHit[] {
         }
       }
       if (restartSeen) continue;
+
+      // If control RETURNS between the destroy and the acquisition, the destroy is on a guard/error
+      // bail-out path (cleanup before returning) — mutually exclusive with the acquisition, which is
+      // on a different path. The real cutover shape is destroy→acquire on one straight line, with the
+      // bail AFTER the acquire. (discrawl tail_failure_fallback.go: `_ = root.Close(); return …`.)
+      let returnsBeforeAcquire = false;
+      for (let j = i + 1; j < acquireLine; j++) {
+        if (/\breturn\b/.test(lines[j])) {
+          returnsBeforeAcquire = true;
+          break;
+        }
+      }
+      if (returnsBeforeAcquire) continue;
 
       // The acquisition's error path must bail (return) within a few lines.
       const errCheckEnd = Math.min(end, acquireLine + ERR_CHECK_WINDOW);
