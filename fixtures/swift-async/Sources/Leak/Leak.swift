@@ -5,7 +5,10 @@ public struct Leak {
     public init() {}
     public func hangs() async -> Int {
         await withCheckedContinuation { (c: CheckedContinuation<Int, Never>) in
-            let _ = c // BUG: never calls c.resume(...) on any path
+            // BUG: the continuation is neither resumed nor stored — it is dropped, so the caller
+            // hangs forever. (Referencing `c` at all would look like the stored-continuation
+            // pattern; a genuine leak drops it entirely.)
+            _ = 1
         }
     }
 }

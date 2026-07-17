@@ -104,20 +104,23 @@ func hasTerminator(_ node: some SyntaxProtocol) -> Bool {
     let v = TerminatorFinder(); v.walk(node); return v.found
 }
 
-/// Is the continuation assigned out (stored on self / a var) or its onTermination set? Then a
-/// missing finish() in a stream closure is not conclusive.
+/// The continuation ESCAPES the closure if it is referenced as anything other than the receiver of a
+/// `cont.<method>` call (`cont.resume`, `cont.yield`, `cont.finish`, `cont.onTermination = …`) —
+/// i.e. passed as an argument, stored on self, appended to a queue, assigned to a var. When it
+/// escapes, resume/finish happens ELSEWHERE (a waiter queue, an actor's pending map — a common and
+/// correct pattern), so the in-closure resume-coverage rules (SA001/SA003) cannot conclude a leak.
 final class ContinuationEscapeFinder: SyntaxVisitor {
     let cont: String; var escapes = false
     init(_ cont: String) { self.cont = cont; super.init(viewMode: .sourceAccurate) }
-    override func visit(_ n: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
-        if n.declName.baseName.text == "onTermination",
-           let b = n.base?.as(DeclReferenceExprSyntax.self), b.baseName.text == cont { escapes = true }
-        return .visitChildren
-    }
-    override func visit(_ n: InfixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
-        // `something = cont` — the continuation is stored somewhere it can be finished later.
-        if n.operator.is(AssignmentExprSyntax.self),
-           let r = n.rightOperand.as(DeclReferenceExprSyntax.self), r.baseName.text == cont { escapes = true }
+    override func visit(_ n: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        guard n.baseName.text == cont else { return .visitChildren }
+        // `cont` as the base of a member access (`cont.resume(...)`) is a method call on it, not an
+        // escape. Every other reference hands the continuation off.
+        if let member = n.parent?.as(MemberAccessExprSyntax.self),
+           member.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == cont {
+            return .visitChildren
+        }
+        escapes = true
         return .visitChildren
     }
 }
@@ -160,13 +163,25 @@ final class ConcurrencyAnalyzer: SyntaxVisitor {
     // ---- SA001/SA002: CheckedContinuation resume coverage ----
     func analyzeContinuation(name: String, call: FunctionCallExprSyntax, closure: ClosureExprSyntax) {
         let cont = closureParamName(closure)
-        let resumes = countResumes(closure.statements, cont, conv)
 
-        // SA001a — the continuation is NEVER resumed: the awaiting caller hangs forever.
+        // SA002 — two resumes reachable in sequence (no branch/exit between): a runtime crash. This
+        // applies whether or not the continuation escapes.
+        let dv = DoubleResumeVisitor(cont: cont, file: file, conv: conv, continuationName: name)
+        dv.walk(closure.statements)
+        findings.append(contentsOf: dv.findings)
+
+        // SA001 resume-coverage ONLY applies when the continuation does NOT escape the closure. A
+        // stored continuation (waiter queue, actor pending map, timeout task) is resumed elsewhere —
+        // the common, correct pattern — and reasoning about its coverage needs cross-function
+        // analysis this lane deliberately does not attempt. Suppress to stay high-precision.
+        if continuationEscapes(closure.statements, cont) { return }
+
+        let resumes = countResumes(closure.statements, cont, conv)
+        // SA001a — the continuation is NEVER resumed and never stored: the awaiting caller hangs.
         if resumes.isEmpty {
             findings.append(Finding(
                 Rule: "SA001", Kind: "continuation-misuse", File: file, Line: line(call),
-                Message: "`\(name)` closure never calls `\(cont).resume(...)` on any path — the awaiting caller hangs forever"))
+                Message: "`\(name)` closure never calls `\(cont).resume(...)` on any path and never stores the continuation — the awaiting caller hangs forever"))
             return
         }
 
@@ -176,11 +191,6 @@ final class ConcurrencyAnalyzer: SyntaxVisitor {
         let gv = EarlyExitLeakVisitor(cont: cont, file: file, conv: conv, continuationName: name)
         gv.walk(closure.statements)
         findings.append(contentsOf: gv.findings)
-
-        // SA002 — two resumes reachable in sequence (no branch/exit between): a runtime crash.
-        let dv = DoubleResumeVisitor(cont: cont, file: file, conv: conv, continuationName: name)
-        dv.walk(closure.statements)
-        findings.append(contentsOf: dv.findings)
     }
 
     // ---- SA003: AsyncStream never finished (advisory) ----
@@ -198,11 +208,15 @@ final class ConcurrencyAnalyzer: SyntaxVisitor {
     // ---- SA005: fire-and-forget Task (advisory) ----
     override func visit(_ node: CodeBlockItemSyntax) -> SyntaxVisitorContinueKind {
         if case .expr(let expr) = node.item, let call = expr.as(FunctionCallExprSyntax.self) {
-            let isTask = (calleeName(call) == "Task") || isMemberCall(call, base: "Task", member: "detached")
-            if isTask, continuationClosure(call) != nil {
+            // Only Task.detached is genuinely unstructured — it inherits NO priority, task-local
+            // values, or cancellation from its context. A bare `Task { }` DOES inherit those and is
+            // an extremely common intentional pattern (e.g. bridging into an onCancel handler), so
+            // flagging every one is pure noise (63 in Tachikoma, all intentional). Scope SA005 to a
+            // discarded Task.detached.
+            if isMemberCall(call, base: "Task", member: "detached"), continuationClosure(call) != nil {
                 findings.append(Finding(
                     Rule: "SA005", Kind: "goroutine-leak", File: file, Line: line(call),
-                    Message: "advisory: unstructured `Task { }` whose handle is discarded — its work outlives the caller and cannot be cancelled or awaited"))
+                    Message: "advisory: discarded `Task.detached { }` — detached work inherits no cancellation, priority, or task-local context from its caller and cannot be awaited"))
             }
         }
         return .visitChildren
