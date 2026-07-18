@@ -562,6 +562,92 @@ function ruleFlakyTimingTest(lines: string[]): RawHit[] {
   return hits;
 }
 
+/**
+ * R7: cleanup-by-stale-snapshot TOCTOU (crabbox #1124/#1126/#1146/#1147 "orphan-sweep vs concurrent
+ * Acquire" cluster). A destructive call (Stop/Delete/Remove/Kill/Destroy/Terminate/Release) fires
+ * inside a `for … range <list/inventory>` loop on an item selected by a CONFIG/NAME/label match
+ * rather than a proven-owned identity, with NO ownership fence — `…IfUnchanged` / `…Unchanged` /
+ * a `Revision`/compare-and-swap — anywhere in that loop body. Under a race a concurrent Acquire that
+ * reused the same config is matched and destroyed (blacksmith #1126 killed a healthy concurrent
+ * warmup; our own `ResolveLeaseClaim` lookup was NOT a sufficient fence). The fix is ownership-by-ID
+ * or a revision-aware CAS gating the destroy — steipete's `RemoveLeaseClaimIfUnchanged` /
+ * `VerifyLeaseClaimUnchanged`. Suppress with `// concurrency-ok:`.
+ *
+ * High-precision by construction: requires the range-over-list loop AND a config/name match guard AND
+ * a destructive call IN THE SAME loop body, and abstains the instant an `Unchanged`/`Revision`/CAS
+ * fence token appears in that body (that is exactly the FIXED shape). Scoped to the loop body by
+ * brace depth, so unrelated loops never bleed in.
+ */
+function ruleCleanupStaleSnapshot(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  // `for … range <expr>` where the ranged expression reads as a point-in-time inventory/list.
+  const RANGE_RE = /^\s*for\b[^{]*\brange\b\s+([\w.]+(?:\([^)]*\))?)/;
+  const LIST_RE = /\b(?:list|inventory|snapshot|orphan|candidate|allids)\w*|\bparse\w*list\b/i;
+  // A guard that selects the victim by config/name/label — weak identity, the root of the bug.
+  const MATCH_RE = /matches\w*config|configmatch|\bmatches\s*\(|\.name\s*[!=]=|namematch|byconfig|\.labels?\b|\.tags?\b/i;
+  // The destructive action on the matched item.
+  const DESTRUCTIVE_RE = /\b[\w.]+\.(?:stop|delete|remove|kill|destroy|terminate|teardown|release)\w*\s*\(/i;
+  // The ownership fence that makes the destroy safe — its presence is the FIXED shape → abstain.
+  // Includes revision-aware CAS (…IfUnchanged/Revision) AND exact-identity binding proofs
+  // (validate…Claim/Identity, claimBinding, ownedBy). Deliberately EXCLUDES a bare ResolveLeaseClaim
+  // lookup — steipete rejected exactly that as insufficient on #1126 (a config matcher can't tell a
+  // healthy in-use box from an orphan), so a lookup is not a fence.
+  const FENCE_RE = /\bunchanged\b|ifunchanged\b|\brevision\b|\bcompareandswap\b|\bcas\b|validate\w*claim|validate\w*identity|verify\w*claim|verify\w*identity|claimbinding|\bownedby\b|\bisowned\b|exact\w*claim|claimowned|owned\w*server|cleanupclaim|claimeligible|\.cloudid\s*[!=]=/i;
+
+  // Function-less brace scan: find each `for … range` header, then walk its body by brace depth.
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i];
+    const rm = header.match(RANGE_RE);
+    if (!rm) continue;
+    const ranged = rm[1];
+    // The ranged expression itself, or a `x := …List…` assigned within the preceding ~8 lines, must
+    // read as an inventory/list. (blacksmith: `for _, item := range parseBlacksmithList(list)`.)
+    const prior = lines.slice(Math.max(0, i - 8), i + 1).join("\n");
+    if (!LIST_RE.test(ranged) && !LIST_RE.test(prior)) continue;
+
+    // Body range by brace depth from the `for` line.
+    let depth = 0;
+    let bodyStart = -1;
+    let bodyEnd = -1;
+    for (let j = i; j < lines.length; j++) {
+      depth += (lines[j].match(/\{/g) || []).length - (lines[j].match(/\}/g) || []).length;
+      if (bodyStart === -1 && lines[j].includes("{")) bodyStart = j;
+      if (bodyStart !== -1 && depth <= 0) {
+        bodyEnd = j;
+        break;
+      }
+    }
+    if (bodyStart === -1 || bodyEnd === -1) continue;
+    const body = lines.slice(bodyStart, bodyEnd + 1);
+    const bodyText = body.join("\n");
+
+    if (FENCE_RE.test(bodyText)) continue; // fenced by an Unchanged/Revision/CAS check → the fixed shape
+    if (!MATCH_RE.test(bodyText)) continue; // no config/name match guard → not this bug class
+
+    // Find the destructive call line inside the body (that is where the fix point is).
+    for (let j = bodyStart; j <= bodyEnd; j++) {
+      const t = lines[j];
+      if (/^\s*(?:\/\/|\*)/.test(t)) continue; // comment
+      if (/^\s*func\b/.test(t)) break; // guard against a malformed scan crossing a func boundary
+      if (!DESTRUCTIVE_RE.test(t)) continue;
+      if (/^\s*defer\b/.test(t)) continue; // deferred cleanup, not an in-loop sweep
+      hits.push({
+        line: j + 1,
+        ruleId: "cleanup-stale-snapshot",
+        kind: "toctou",
+        summary:
+          "destructive cleanup fires on an item matched by config/name from a listed inventory with no ownership fence (…IfUnchanged/…Unchanged/Revision/CAS) — under a race a concurrent Acquire reusing the same config is matched and destroyed; prove ownership by the emitted ID or gate the destroy on a revision-aware compare-and-swap",
+        evidenceLine: t.trim(),
+        // Heuristic (dogfood-pending across repos): surfaced in the concurrency gate but non-blocking
+        // until proven clean on real crabbox PRs, then promote to hard-fail. See crabbox.md §7c.
+        advisory: true,
+      });
+      break; // one hit per loop is enough to flag the sweep
+    }
+  }
+  return hits;
+}
+
 // Test files get only the advisory test-quality rules; production files get the hard-fail set.
 const TEST_RULES = [ruleFlakyTimingTest];
 
@@ -573,6 +659,7 @@ const RULES = [
   ruleLeakOnErrorReturn,
   ruleShadowedRetryState,
   ruleChannelMisuse,
+  ruleCleanupStaleSnapshot,
 ];
 
 /**

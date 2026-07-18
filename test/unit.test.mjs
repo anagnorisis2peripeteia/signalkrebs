@@ -1040,3 +1040,111 @@ test("ts lint: leak-on-error fires on an opened handle never closed before bail,
     assert.equal(hits.length, 0, "returned handle escapes → owned by the caller");
   });
 });
+
+// --- cleanup-stale-snapshot TOCTOU (crabbox #1124/#1126/#1146/#1147 orphan-sweep cluster) ---
+
+test("lint: cleanup-stale-snapshot fires (advisory) on the #1126 shape (range list → config match → Stop, no fence)", () => {
+  const src = [
+    "package p",
+    "func (b *bk) cleanupFailedWarmup(ctx context.Context) {",
+    "  list, err := b.commandOutput(ctx, blacksmithListAllArgs(b.cfg))",
+    "  if err != nil { return }",
+    "  for _, item := range parseBlacksmithList(list) {",
+    "    if !blacksmithMatchesConfig(item, b.cfg) {",
+    "      continue",
+    "    }",
+    "    if err := b.Stop(ctx, StopRequest{ID: item.ID}); err == nil {",
+    "      return",
+    "    }",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "b.go": src }, (dir) => {
+    const hits = lintGo(dir, ["b.go"]).filter((d) => d.ruleId === "cleanup-stale-snapshot" && !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].advisory, true, "brand-new heuristic lands advisory until dogfooded on real crabbox PRs");
+    assert.match(hits[0].summary, /ownership fence/);
+  });
+});
+
+test("lint: cleanup-stale-snapshot abstains when the destroy is gated on a revision-aware CAS (…IfUnchanged)", () => {
+  const src = [
+    "package p",
+    "func (b *bk) cleanupOrphanClaims(ctx context.Context) {",
+    "  for _, claim := range listLeaseClaims(b.cfg) {",
+    "    if !claim.MatchesConfig(b.cfg) { continue }",
+    "    if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil { continue }",
+    "    b.Stop(ctx, StopRequest{ID: claim.LeaseID})",
+    "  }",
+    "}",
+  ].join("\n");
+  withRepo({ "b.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["b.go"]).filter((d) => d.ruleId === "cleanup-stale-snapshot" && !d.suppressed).length, 0);
+  });
+});
+
+test("lint: cleanup-stale-snapshot abstains when an exact-identity binding proof gates the destroy (validate…Identity)", () => {
+  const src = [
+    "package p",
+    "func (b *bk) cleanup(ctx context.Context) error {",
+    "  for _, server := range b.listServers(ctx) {",
+    "    if !server.MatchesConfig(b.cfg) { continue }",
+    "    if _, _, err := b.validateVMIdentity(ctx, server.Name, server.Labels[\"lease\"]); err != nil { return err }",
+    "    if err := b.deleteVM(ctx, server.Name); err != nil { return err }",
+    "  }",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "b.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["b.go"]).filter((d) => d.ruleId === "cleanup-stale-snapshot" && !d.suppressed).length, 0);
+  });
+});
+
+test("lint: cleanup-stale-snapshot abstains when an exact-local-claim ownership gate precedes the destroy (…ClaimOwned)", () => {
+  const src = [
+    "package p",
+    "func (b *bk) Cleanup(ctx context.Context) error {",
+    "  for _, server := range b.listServers(ctx) {",
+    "    if !core.ShouldCleanupServer(server, now) { continue }",
+    "    owned, err := exactParallelsClaimOwned(server.Labels[\"lease\"], server.CloudID, host)",
+    "    if err != nil { return err }",
+    "    if !owned { continue }",
+    "    if err := client.Delete(ctx, server.CloudID); err != nil { return err }",
+    "  }",
+    "  return nil",
+    "}",
+  ].join("\n");
+  withRepo({ "b.go": src }, (dir) => {
+    assert.equal(lintGo(dir, ["b.go"]).filter((d) => d.ruleId === "cleanup-stale-snapshot" && !d.suppressed).length, 0);
+  });
+});
+
+// --- spawn-without-cloexec (CodexBar #2124: subprocess/pipe fds not close-on-exec) ---
+
+test("lint: spawn-without-cloexec fires when posix_spawn flags omit POSIX_SPAWN_CLOEXEC_DEFAULT", () => {
+  const src = [
+    "import Foundation",
+    "final class Probe {",
+    "  static let shellSpawnFlags = Int16(POSIX_SPAWN_SETSID)",
+    "  func run() { posix_spawn(&pid, path, &fa, &attrs, argv, envp) }",
+    "}",
+  ].join("\n");
+  withRepo({ "P.swift": src }, (dir) => {
+    const hits = lintSwift(dir, ["P.swift"]).filter((d) => d.ruleId === "spawn-without-cloexec" && !d.suppressed);
+    assert.equal(hits.length, 1);
+    assert.match(hits[0].summary, /POSIX_SPAWN_CLOEXEC_DEFAULT/);
+  });
+});
+
+test("lint: spawn-without-cloexec abstains when POSIX_SPAWN_CLOEXEC_DEFAULT is set", () => {
+  const src = [
+    "import Foundation",
+    "final class Probe {",
+    "  static let shellSpawnFlags = Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT)",
+    "  func run() { posix_spawn(&pid, path, &fa, &attrs, argv, envp) }",
+    "}",
+  ].join("\n");
+  withRepo({ "P.swift": src }, (dir) => {
+    assert.equal(lintSwift(dir, ["P.swift"]).filter((d) => d.ruleId === "spawn-without-cloexec" && !d.suppressed).length, 0);
+  });
+});
