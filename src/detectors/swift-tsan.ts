@@ -17,6 +17,7 @@ import { lintSwift } from "../lint/swift-lint.js";
 
 const SELF_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SWIFT_FIXTURE = join(SELF_ROOT, "fixtures", "swift-tsan");
+const SWIFT_CLEAN_FIXTURE = join(SELF_ROOT, "fixtures", "swift-clean");
 
 export interface SwiftExec {
   stdout: string;
@@ -191,18 +192,33 @@ export const swiftTsanAdapter: DetectorAdapter = {
       return { checked: false, plantedDefectCaught: false, detail: `planted-race fixture missing at ${SWIFT_FIXTURE}` };
     }
     const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const racyStatic = lintSwift(SWIFT_FIXTURE, ["Sources/Counter/Counter.swift"]).some(
+      (d) => d.ruleId === "leak-on-error-return",
+    );
+    const cleanStaticHits = existsSync(join(SWIFT_CLEAN_FIXTURE, "Sources/Counter/Counter.swift"))
+      ? lintSwift(SWIFT_CLEAN_FIXTURE, ["Sources/Counter/Counter.swift"])
+      : [];
+    const cleanStatic = cleanStaticHits.some((d) => d.ruleId === "leak-on-error-return");
+
     const res = runSwift(SWIFT_FIXTURE, ["test", "--sanitize=thread", "--filter", "testPlantedRace"], timeoutMs);
     const combined = res.stdout + "\n" + res.stderr;
     if (res.spawnError) {
       return { checked: false, plantedDefectCaught: false, detail: res.spawnError };
     }
     const caught = /WARNING: ThreadSanitizer:/.test(combined);
+    const staticCaught = racyStatic && !cleanStatic;
+    const staticDetail = staticCaught
+      ? "static: planted swift-lint leak-on-error-return in fixtures/swift-tsan was caught, and fixtures/swift-clean is clean"
+      : racyStatic
+        ? "static: fixtures/swift-tsan leak-on-error pattern caught, but fixtures/swift-clean also fires leak-on-error-return"
+        : "static: fixtures/swift-tsan leak-on-error pattern was NOT caught by swift-lint";
+    const dynamicDetail = caught
+      ? "dynamic: planted race in fixtures/swift-tsan caught by --sanitize=thread"
+      : "dynamic: planted race in fixtures/swift-tsan was NOT caught — swift-tsan is not detecting races on this host";
     return {
       checked: true,
-      plantedDefectCaught: caught,
-      detail: caught
-        ? "planted race in fixtures/swift-tsan caught by --sanitize=thread"
-        : "fixtures/swift-tsan planted race was NOT caught — the swift-tsan lane is not detecting races on this host",
+      plantedDefectCaught: caught && staticCaught,
+      detail: `${staticDetail}; ${dynamicDetail}`,
     };
   },
 };
