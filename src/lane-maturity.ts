@@ -32,7 +32,7 @@ export const LANE_MATURITY: Record<DetectorTool, LaneMaturity> = {
   },
   "swift-tsan": {
     hasStaticLint: true,
-    hardRules: ["data-race", "destructive-before-confirm"],
+    hardRules: ["data-race", "destructive-before-confirm", "leak-on-error-return"],
     suppression: "pragma",
     testFilePolicy: "advisory",
     racyFixture: "fixtures/swift-tsan",

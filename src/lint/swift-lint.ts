@@ -13,6 +13,10 @@ import { downgradeTestFileDefect } from "./lint-common.js";
 
 const SUPPRESS_RE = /\/\/\s*concurrency-ok:\s*(.+)$/;
 
+function countBraces(text: string): number {
+  return (text.match(/\{/g) || []).length - (text.match(/\}/g) || []).length;
+}
+
 function collectSuppressions(lines: string[]): Map<number, string> {
   const map = new Map<number, string>();
   lines.forEach((text, i) => {
@@ -117,6 +121,79 @@ function ruleUnsafeCutover(lines: string[]): RawHit[] {
   return detectReassignCutover(lines, SWIFT_CUTOVER_CFG).map((h) => ({ ...h, kind: h.kind as RawHit["kind"] }));
 }
 
+// cleanup methods we can prove are resource-scoped and should be called on acquisition paths
+const SWIFT_CLEANUP_METHODS =
+  "close|closeFile|invalidate|cancel|dispose|release|deactivate|disconnect|destroy|end|shutdown|teardown";
+
+/** R4: acquired resources from a fallible `try` must not be left open on an early return/throw path. */
+function ruleLeakOnErrorReturn(lines: string[]): RawHit[] {
+  const hits: RawHit[] = [];
+  const ACQUIRE_RE = /\b(?:let|var)\s+(\w+)\s*=\s*(?:try\!?|try\?)\b/;
+
+  const hasCleanup = (line: string, target: string): boolean => {
+    return new RegExp(`\\b${target}\\??\\.(?:${SWIFT_CLEANUP_METHODS})\\s*\\(`).test(line);
+  };
+
+  lines.forEach((text, i) => {
+    const am = text.match(ACQUIRE_RE);
+    if (!am) return;
+    const target = am[1];
+    const escapeRe = new RegExp(`(?:return\\s+|[=(,[]\\s*)\\b${target}\\b`);
+
+    let depth = 0;
+    let end = lines.length - 1;
+    for (let j = i + 1; j < lines.length; j++) {
+      depth += countBraces(lines[j]);
+      if (depth < 0) {
+        end = j;
+        break;
+      }
+    }
+
+    let inDefer = false;
+    let deferDepth = 0;
+    let closed = false;
+
+    for (let j = i + 1; j <= end; j++) {
+      const line = lines[j];
+
+      if (/^\s*defer\b/.test(line)) {
+        inDefer = true;
+        deferDepth = countBraces(line);
+      }
+
+      if (inDefer) {
+        deferDepth += countBraces(line);
+      }
+
+      if (!closed && hasCleanup(line, target)) {
+        closed = true;
+      }
+
+      if (!closed && /\b(return|throw)\b/.test(line) && !escapeRe.test(line)) {
+        hits.push({
+          line: i + 1,
+          ruleId: "leak-on-error-return",
+          kind: "goroutine-leak",
+          summary: `'${target}' is acquired here but an early ${line.match(/\bthrow\b/) ? "throw" : "return"} before cleanup registration leaks this handle; move cleanup closer to acquisition`,
+          evidenceLine: text.trim(),
+        });
+        return;
+      }
+
+      if (closed) return;
+
+      if (inDefer) {
+        if (deferDepth <= 0) {
+          inDefer = false;
+          deferDepth = 0;
+        }
+      }
+    }
+  });
+  return hits;
+}
+
 /** R4: subprocess/pipe descriptors not close-on-exec atomically (CodexBar #2124). A `posix_spawn*`
  * whose spawn flags/attributes omit POSIX_SPAWN_CLOEXEC_DEFAULT lets a CONCURRENTLY-spawned child
  * inherit this process's open descriptors (e.g. a probe pipe's read end) and hold them open — so the
@@ -159,7 +236,13 @@ function ruleSpawnPipeWithoutCloexec(lines: string[]): RawHit[] {
   return hits;
 }
 
-const RULES = [ruleTimerNeverInvalidated, ruleDispatchSourceNeverCancelled, ruleUnsafeCutover, ruleSpawnPipeWithoutCloexec];
+const RULES = [
+  ruleTimerNeverInvalidated,
+  ruleDispatchSourceNeverCancelled,
+  ruleUnsafeCutover,
+  ruleLeakOnErrorReturn,
+  ruleSpawnPipeWithoutCloexec,
+];
 
 export function lintSwift(repoDir: string, touchedRanges: string[]): ConcurrencyDefect[] {
   const defects: ConcurrencyDefect[] = [];
