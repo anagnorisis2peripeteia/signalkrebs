@@ -17,7 +17,13 @@ const path = require("node:path");
 
 const outDir = process.env.SIGNALKREBS_PROBE_OUT;
 const mainScript = process.argv[1] || "";
-const isPackageManager = /(npm-cli\.js|npx-cli\.js|[\\/]npm[\\/]bin|pnpm|yarn|corepack)/i.test(mainScript);
+// At --require time argv[1] is still the UNRESOLVED launcher path, so an
+// nvm-style symlink (<prefix>/bin/npm) dodges the path patterns — catch it by
+// basename too. A probe armed inside npm hijacks the harness's timeout SIGTERM
+// (exit 199) and writes wrapper junk reports.
+const isPackageManager =
+  /(npm-cli\.js|npx-cli\.js|[\\/]npm[\\/]bin|pnpm|yarn|corepack)/i.test(mainScript) ||
+  /^(npm|npx)$/i.test(path.basename(mainScript));
 
 if (outDir && !isPackageManager) {
   let drained = false;
