@@ -180,9 +180,12 @@ export const tsAsyncAdapter: DetectorAdapter = {
             stderr?: Buffer | string;
           };
           output = (err.stdout?.toString() ?? "") + (err.stderr?.toString() ?? "");
-          if (err.signal === "SIGTERM" && err.code === "ETIMEDOUT") {
+          if (err.code === "ETIMEDOUT") {
             // Command timed out: tests may have finished but the process never
-            // drained — the leak symptom this probe exists to catch.
+            // drained — the leak symptom this probe exists to catch. The child
+            // can absorb the kill SIGTERM (a probe-armed npm exits 199 instead
+            // of dying by signal), so err.signal is not a reliable timeout
+            // marker — ETIMEDOUT alone is.
             hung = true;
           } else if (err.signal) {
             signal = err.signal;
