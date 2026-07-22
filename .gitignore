@@ -17,3 +17,6 @@ fixtures/**/.build/
 fixtures/**/Cargo.lock
 fixtures/**/TestResults/
 runtime/**/.build/
+
+# einsiedlerkrebs AI-authored scratch output (regenerable)
+authored/

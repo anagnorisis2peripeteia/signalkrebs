@@ -60,7 +60,8 @@ const SPECS = {
     config: { timeoutMs: 120000 },
   },
   "py-async": {
-    toolchain: "python3",
+    // prefer python3 when available, but accept python as a fallback runtime alias
+    toolchain: ["python3", "python"],
     racyFixture: "fixtures/py-async",
     racyChanged: ["test_probe.py"],
     cleanFixture: "fixtures/py-clean",
@@ -102,6 +103,11 @@ function haveBinary(bin) {
   return which.status === 0;
 }
 
+function resolveToolchain(toolchain) {
+  const candidates = Array.isArray(toolchain) ? toolchain : [toolchain];
+  return candidates.find((bin) => haveBinary(bin));
+}
+
 function pass(msg) {
   console.log(`  ✓ ${msg}`);
 }
@@ -113,8 +119,10 @@ function fail(tool, msg, extra) {
 
 function validate(tool, spec) {
   console.log(`\n[${tool}] validating against real ${spec.toolchain} toolchain`);
-  if (!haveBinary(spec.toolchain)) {
-    console.error(`  - ${spec.toolchain} not on PATH; cannot validate ${tool} (exit 3)`);
+  const toolchain = resolveToolchain(spec.toolchain);
+  if (!toolchain) {
+    const candidates = Array.isArray(spec.toolchain) ? spec.toolchain : [spec.toolchain];
+    console.error(`  - ${candidates.join("/")} not on PATH; cannot validate ${tool} (exit 3)`);
     process.exitCode = 3;
     return null;
   }

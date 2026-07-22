@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -25,6 +25,16 @@ const RACY_FIXTURE = join(SELF_ROOT, "fixtures", "py-async");
 const CLEAN_FIXTURE = join(SELF_ROOT, "fixtures", "py-clean");
 const DEFAULT_TIMEOUT_MS = 60_000;
 const HANG_SECONDS = 8;
+const PYTHON_CANDIDATES = ["python3", "python"];
+
+function haveBinary(bin: string): boolean {
+  const which = spawnSync(process.platform === "win32" ? "where" : "which", [bin], { encoding: "utf8" });
+  return which.status === 0;
+}
+
+function resolvePythonBinary(): string | null {
+  return PYTHON_CANDIDATES.find((bin) => haveBinary(bin)) ?? null;
+}
 
 /** Nearest dir up from a `.py` file that holds tests / a project marker (else the file's own dir). */
 function packageOf(repoDir: string, file: string): string {
@@ -47,8 +57,16 @@ function packageOf(repoDir: string, file: string): string {
 
 /** Run the probe on a package dir; a faulthandler "Timeout" dump ⇒ a deadlock anchored at a line. */
 function runProbe(pkgDir: string, timeoutMs: number): { deadlock: { file: string; line: number } | null; exec: ExecEvidence } {
+  const python = resolvePythonBinary();
+  if (!python) {
+    return {
+      deadlock: null,
+      exec: { exitCode: -1, signal: null, spawnError: "no python executable (python3/python) on PATH", stderr: "" },
+    };
+  }
+
   try {
-    execFileSync("python3", [PROBE, pkgDir], {
+    execFileSync(python, [PROBE, pkgDir], {
       encoding: "utf8",
       timeout: timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
@@ -76,7 +94,7 @@ function runProbe(pkgDir: string, timeoutMs: number): { deadlock: { file: string
       // Spawn failure or the outer safety-net timeout fired without a dump → fail closed.
       return {
         deadlock: null,
-        exec: { exitCode: -1, signal: err.signal ?? null, spawnError: "python3 not found or probe killed", stderr },
+        exec: { exitCode: -1, signal: err.signal ?? null, spawnError: `python probe failed to run via ${python}`, stderr },
       };
     }
     // Non-zero exit without a Timeout header = an ordinary test failure, not a concurrency defect.
@@ -220,7 +238,7 @@ export const pyAsyncAdapter: DetectorAdapter = {
         ? cleanIsClean
           ? "planted deadlock in fixtures/py-async caught by the faulthandler probe; clean fixture completes"
           : "planted deadlock caught but the clean fixture did not complete cleanly — lane not trustworthy"
-        : "fixtures/py-async planted deadlock was NOT caught — the py-async probe is not detecting on this host (missing python3)",
+        : "fixtures/py-async planted deadlock was NOT caught — the py-async probe did not detect it on this host (interpreter unavailable or runtime mismatch)",
     };
   },
 };
